@@ -1,0 +1,87 @@
+
+services:
+  db:
+    image: postgres:16
+    container_name: terravoy-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-terravoy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-terravoy_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-terravoy}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - terravoy_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB} -h localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  api:
+    build:
+      context: .
+      dockerfile: ./server/Dockerfile
+    container_name: terravoy-api
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-terravoy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-terravoy_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-terravoy}
+      PORT: ${PORT:-3000}
+      TERRA_JWT_SECRET: ${TERRA_JWT_SECRET:-dev_terra_secret_change_me}
+      TERRA_DEV_TOKEN: ${TERRA_DEV_TOKEN:-dev_terra_token}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-dev_service_role}
+      LEAN_APP_ID: ${LEAN_APP_ID:-j66DPN5aeyYrMyytELnR2CHj-gzGzoHsz}
+      LEAN_APP_KEY: ${LEAN_APP_KEY:-VoEciTCuMlzhQzd3y49wYy2T}
+      LEAN_SERVER: ${LEAN_SERVER:-https://j66dpn5a.lc-cn-n1-shared.com}
+      LEAN_MASTER_KEY: ${LEAN_MASTER_KEY:-DTHmBRga3SoxYKLAx40JNSSr}
+      ENABLE_MATCH_WORKER: ${ENABLE_MATCH_WORKER:-0}
+      MATCH_WORKER_INTERVAL_MS: ${MATCH_WORKER_INTERVAL_MS:-1000}
+      MATCH_WORKER_BATCH: ${MATCH_WORKER_BATCH:-50}
+      DEV_AUTH_BYPASS: ${DEV_AUTH_BYPASS:-0}
+    ports:
+      - "${PORT:-3000}:3000"
+    command: ["npm", "run", "start"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  worker:
+    build:
+      context: .
+      dockerfile: ./server/Dockerfile
+    container_name: terravoy-worker
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-terravoy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-terravoy_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-terravoy}
+      TERRA_JWT_SECRET: ${TERRA_JWT_SECRET:-dev_terra_secret_change_me}
+      TERRA_DEV_TOKEN: ${TERRA_DEV_TOKEN:-dev_terra_token}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-dev_service_role}
+      LEAN_APP_ID: ${LEAN_APP_ID:-j66DPN5aeyYrMyytELnR2CHj-gzGzoHsz}
+      LEAN_APP_KEY: ${LEAN_APP_KEY:-VoEciTCuMlzhQzd3y49wYy2T}
+      LEAN_SERVER: ${LEAN_SERVER:-https://j66dpn5a.lc-cn-n1-shared.com}
+      LEAN_MASTER_KEY: ${LEAN_MASTER_KEY:-DTHmBRga3SoxYKLAx40JNSSr}
+      ENABLE_MATCH_WORKER: "1"
+      MATCH_WORKER_INTERVAL_MS: ${MATCH_WORKER_INTERVAL_MS:-1000}
+      MATCH_WORKER_BATCH: ${MATCH_WORKER_BATCH:-50}
+      DEV_AUTH_BYPASS: ${DEV_AUTH_BYPASS:-0}
+    command: ["npm", "run", "start"]
+
+volumes:
+  terravoy_pg:

@@ -1,0 +1,3 @@
+{
+  "requiredKeys": ["profileId", "isCompleted"]
+}

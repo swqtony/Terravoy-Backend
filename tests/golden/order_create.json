@@ -1,0 +1,14 @@
+{
+  "requiredKeys": [
+    "id",
+    "order_no",
+    "traveler_id",
+    "host_id",
+    "experience_id",
+    "start_time",
+    "status",
+    "payment_status",
+    "total_amount",
+    "currency"
+  ]
+}

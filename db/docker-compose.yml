@@ -1,0 +1,16 @@
+services:
+  db:
+    image: postgres:16
+    container_name: terravoy-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: terravoy
+      POSTGRES_PASSWORD: terravoy_dev
+      POSTGRES_DB: terravoy
+    ports:
+      - "5432:5432"
+    volumes:
+      - terravoy_pg:/var/lib/postgresql/data
+
+volumes:
+  terravoy_pg:

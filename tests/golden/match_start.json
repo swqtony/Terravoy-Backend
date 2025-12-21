@@ -1,0 +1,5 @@
+{
+  "allowedStatus": ["waiting", "matched"],
+  "requiredKeysWhenMatched": ["sessionId", "requestId", "selfProfileId", "otherProfileId", "conversationId"],
+  "requiredKeysWhenWaiting": ["requestId", "profileId", "tripCardId"]
+}

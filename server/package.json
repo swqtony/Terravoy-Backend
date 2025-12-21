@@ -1,0 +1,23 @@
+{
+  "name": "terravoy-backend-local",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "dev": "NODE_ENV=development node src/app.js",
+    "db:migrate": "node scripts/migrate.js",
+    "contract:test": "node tests/contract_tests.js"
+  },
+  "dependencies": {
+    "@fastify/cors": "^9.0.1",
+    "dotenv": "^16.4.5",
+    "fastify": "^4.27.2",
+    "fastify-plugin": "^4.5.1",
+    "node-fetch": "^3.3.2",
+    "pg": "^8.12.0",
+    "pino": "^9.4.0",
+    "pino-pretty": "^10.3.0",
+    "jsonwebtoken": "^9.0.2"
+  }
+}

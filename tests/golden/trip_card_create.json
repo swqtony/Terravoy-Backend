@@ -1,0 +1,3 @@
+{
+  "requiredKeys": ["id", "profile_id", "destination_city", "start_date", "end_date"]
+}

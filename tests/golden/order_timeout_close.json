@@ -1,0 +1,7 @@
+{
+  "description": "Orders older than 12h in PENDING_HOST_CONFIRM should be auto-cancelled to CANCELLED_REFUNDED",
+  "checks": [
+    "status becomes CANCELLED_REFUNDED",
+    "payment_status becomes REFUNDED"
+  ]
+}
