@@ -1,2 +1,36 @@
 server/node_modules/
 supabase/.temp/
+
+# Node/npm
+**/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Logs
+*.log
+logs/
+
+# Env files (keep example)
+.env
+.env.*
+!.env.example
+
+# Build/test artifacts
+dist/
+build/
+out/
+coverage/
+.nyc_output/
+
+# Tool caches
+.cache/
+.parcel-cache/
+.turbo/
+.vite/
+.eslintcache
+
+# OS files
+.DS_Store
+Thumbs.db
