@@ -16,9 +16,6 @@ export const config = {
     jwtSecret: process.env.TERRA_JWT_SECRET || 'dev_terra_secret_change_me',
     devToken: process.env.TERRA_DEV_TOKEN || 'dev_terra_token',
   },
-  supabase: {
-    serviceRole: process.env.SUPABASE_SERVICE_ROLE_KEY || 'dev_service_role',
-  },
   auth: {
     localJwtSecret: process.env.LOCAL_JWT_SECRET || 'dev_local_jwt_secret',
     localJwtTtlMin: Number(process.env.LOCAL_JWT_TTL_MIN) || 10,

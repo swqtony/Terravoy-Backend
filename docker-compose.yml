@@ -37,7 +37,6 @@ services:
       PORT: ${PORT:-3000}
       TERRA_JWT_SECRET: ${TERRA_JWT_SECRET:-dev_terra_secret_change_me}
       TERRA_DEV_TOKEN: ${TERRA_DEV_TOKEN:-dev_terra_token}
-      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-dev_service_role}
       LEAN_APP_ID: ${LEAN_APP_ID:-j66DPN5aeyYrMyytELnR2CHj-gzGzoHsz}
       LEAN_APP_KEY: ${LEAN_APP_KEY:-VoEciTCuMlzhQzd3y49wYy2T}
       LEAN_SERVER: ${LEAN_SERVER:-https://j66dpn5a.lc-cn-n1-shared.com}
@@ -72,7 +71,6 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-terravoy}
       TERRA_JWT_SECRET: ${TERRA_JWT_SECRET:-dev_terra_secret_change_me}
       TERRA_DEV_TOKEN: ${TERRA_DEV_TOKEN:-dev_terra_token}
-      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-dev_service_role}
       LEAN_APP_ID: ${LEAN_APP_ID:-j66DPN5aeyYrMyytELnR2CHj-gzGzoHsz}
       LEAN_APP_KEY: ${LEAN_APP_KEY:-VoEciTCuMlzhQzd3y49wYy2T}
       LEAN_SERVER: ${LEAN_SERVER:-https://j66dpn5a.lc-cn-n1-shared.com}
