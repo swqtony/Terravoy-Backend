@@ -4,10 +4,21 @@ import { authorize } from '../services/authorize.js';
 import { fetchPrefsForMatch, upsertPrefsForMatch } from '../services/preferencesService.js';
 import { createOrReuseConversation } from '../services/leancloudConversation.js';
 
+function requireLeancloudUserId(leancloudUserId) {
+  if (!leancloudUserId || String(leancloudUserId).trim().length === 0) {
+    const err = new Error('leancloudUserId is required');
+    err.code = 'LEAN_USER_ID_REQUIRED';
+    err.statusCode = 400;
+    throw err;
+  }
+  return String(leancloudUserId).trim();
+}
+
 async function ensureProfile(pool, leancloudUserId) {
+  const validated = requireLeancloudUserId(leancloudUserId);
   const { rows } = await pool.query(
     'select ensure_profile_v2($1, $2) as id',
-    [leancloudUserId, null]
+    [validated, null]
   );
   return rows[0]?.id;
 }
@@ -114,6 +125,21 @@ async function buildMatchedResponse(pool, sessionRow, profileId, requestId) {
     sessionRow.request_b_id ||
     null;
   const conversationId = sessionRow.conversation_id ?? null;
+  if (!otherLean) {
+    return {
+      status: 'profile_incomplete',
+      errorCode: 'PEER_LEANCLOUD_ID_MISSING',
+      message: 'peerLeancloudUserId missing',
+      matchSessionId,
+      matchRequestId,
+      peerLeancloudUserId: null,
+      conversationId,
+      reusedConversation: !!conversationId,
+      serverTime: new Date().toISOString(),
+      selfProfileId: profileId,
+      otherProfileId,
+    };
+  }
   return {
     status: 'matched',
     matchSessionId,
@@ -404,6 +430,12 @@ export default async function matchRoutes(app) {
             }, 'match-start downgrade to waiting');
           }
         } else {
+        if (data.status === 'profile_incomplete') {
+          return ok(reply, {
+            ...data,
+            issuedJwt: auth.issuedJwt,
+          });
+        }
         const response = {
           ...data,
           preferences: effectivePrefs,
@@ -452,7 +484,7 @@ export default async function matchRoutes(app) {
     } catch (err) {
       req.log.error(err);
       const status = err.statusCode || 500;
-      return error(reply, 'SERVER_ERROR', err.message || 'Failed to start match', status);
+      return error(reply, err.code || 'SERVER_ERROR', err.message || 'Failed to start match', status);
     }
   });
 
@@ -555,6 +587,12 @@ export default async function matchRoutes(app) {
             issuedJwt: auth.issuedJwt,
           });
         }
+        if (data.status === 'profile_incomplete') {
+          return ok(reply, {
+            ...data,
+            issuedJwt: auth.issuedJwt,
+          });
+        }
         if (sessionRow.conversation_id) {
           const response = {
             ...data,
@@ -602,7 +640,7 @@ export default async function matchRoutes(app) {
     } catch (err) {
       req.log.error(err);
       const status = err.statusCode || 500;
-      return error(reply, 'SERVER_ERROR', err.message || 'Failed to poll match', status);
+      return error(reply, err.code || 'SERVER_ERROR', err.message || 'Failed to poll match', status);
     }
   });
 
@@ -649,6 +687,12 @@ export default async function matchRoutes(app) {
       const sessionRow = await getSessionByRequest(pool, requestId);
       if (sessionRow && sessionRow.conversation_id) {
         const data = await buildMatchedResponse(pool, sessionRow, profileId, requestId);
+        if (data?.status === 'profile_incomplete') {
+          return ok(reply, {
+            ...data,
+            issuedJwt: auth.issuedJwt,
+          });
+        }
         if (data) {
           const response = {
             ...data,
@@ -681,7 +725,7 @@ export default async function matchRoutes(app) {
     } catch (err) {
       req.log.error(err);
       const status = err.statusCode || 500;
-      return error(reply, 'SERVER_ERROR', err.message || 'Failed to heartbeat match', status);
+      return error(reply, err.code || 'SERVER_ERROR', err.message || 'Failed to heartbeat match', status);
     }
   });
 
@@ -721,7 +765,7 @@ export default async function matchRoutes(app) {
     } catch (err) {
       req.log.error(err);
       const status = err.statusCode || 500;
-      return error(reply, 'SERVER_ERROR', err.message || 'Failed to cancel match', status);
+      return error(reply, err.code || 'SERVER_ERROR', err.message || 'Failed to cancel match', status);
     }
   });
 

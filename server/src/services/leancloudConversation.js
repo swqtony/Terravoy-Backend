@@ -46,6 +46,68 @@ async function fetchJson(url, options) {
   return resp.json();
 }
 
+/**
+ * 从 LeanCloud _User 表查询用户资料（nickname/avatarUrl）
+ * 用于填充 participantMeta，解决昵称闪烁问题
+ * @param {string[]} memberIds - LeanCloud 用户 objectId 数组
+ * @returns {Promise<Map<string, {name: string, avatarUrl: string}>>}
+ */
+async function fetchLeancloudUsers(memberIds, { logger } = {}) {
+  if (!memberIds || memberIds.length === 0) {
+    return new Map();
+  }
+  try {
+    ensureLeanConfig();
+    const server = (config.lean.server || '').replace(/\/+$/, '');
+    const query = new URLSearchParams({
+      where: JSON.stringify({ objectId: { $in: memberIds } }),
+      keys: 'objectId,nickname,username,avatar,avatarUrl',
+    });
+    const url = `${server}/1.1/classes/_User?${query.toString()}`;
+    const json = await fetchJson(url, {
+      method: 'GET',
+      headers: leanHeaders({ useMaster: true }),
+    });
+    const users = Array.isArray(json?.results) ? json.results : [];
+    const map = new Map();
+    for (const u of users) {
+      map.set(u.objectId, {
+        name: u.nickname || u.username || 'Traveler',
+        avatarUrl: u.avatar || u.avatarUrl || '',
+      });
+    }
+    if (logger?.debug) {
+      logger.debug({ event: 'leancloud.users.fetched', count: users.length, memberIds }, 'Fetched LeanCloud user profiles');
+    }
+    return map;
+  } catch (err) {
+    // 优雅降级：查询失败不阻塞会话创建
+    if (logger?.warn) {
+      logger.warn({ event: 'leancloud.users.fetch_failed', error: err.message, memberIds }, 'Failed to fetch LeanCloud user profiles, using fallback');
+    }
+    return new Map();
+  }
+}
+
+/**
+ * 构建 participantMeta 对象
+ * @param {string[]} members - 成员 ID 列表
+ * @param {Map<string, {name: string, avatarUrl: string}>} userMap - 用户资料映射
+ * @returns {Object} participantMeta 对象
+ */
+function buildParticipantMeta(members, userMap) {
+  const participantMeta = {};
+  for (const memberId of members) {
+    const user = userMap.get(memberId) || {};
+    participantMeta[memberId] = {
+      role: 'traveler',
+      name: user.name || 'Traveler',
+      avatarUrl: user.avatarUrl || '',
+    };
+  }
+  return participantMeta;
+}
+
 async function findExistingConversation(memberLeanIds, { logger, context } = {}) {
   const members = uniquePair(normalizeMembers(memberLeanIds));
   if (!members) return null;
@@ -88,10 +150,19 @@ async function createConversation(memberLeanIds, { logger, context } = {}) {
   }
   ensureLeanConfig();
   const server = (config.lean.server || '').replace(/\/+$/, '');
+
+  // 获取用户资料填充 participantMeta，解决昵称闪烁问题
+  const userMap = await fetchLeancloudUsers(members, { logger });
+  const participantMeta = buildParticipantMeta(members, userMap);
+
   const body = {
     m: members,
     name: 'Match Chat',
-    attr: { type: 'matchChat', category: 'matchChat' },
+    attr: {
+      type: 'matchChat',
+      category: 'matchChat',
+      participantMeta, // ✅ 包含 nickname 和 avatarUrl
+    },
     tr: false,
     sys: false,
     unique: true,
@@ -111,9 +182,10 @@ async function createConversation(memberLeanIds, { logger, context } = {}) {
         event: 'conversation.created',
         conversationId,
         members,
+        hasParticipantMeta: Object.keys(participantMeta).length > 0,
         ...context,
       },
-      'LeanCloud conversation created'
+      'LeanCloud conversation created with participantMeta'
     );
   }
   return conversationId;

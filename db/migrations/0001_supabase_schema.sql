@@ -178,6 +178,7 @@ CREATE OR REPLACE FUNCTION "public"."ensure_profile_v2"("p_leancloud_user_id" "t
 DECLARE
   existing_id uuid;
 BEGIN
+  -- leancloud_user_id is the external identity used by IM and display layers.
   IF p_leancloud_user_id IS NULL OR length(trim(p_leancloud_user_id)) = 0 THEN
     RAISE EXCEPTION 'LEAN_USER_ID_REQUIRED';
   END IF;
@@ -214,7 +215,7 @@ $$;
 ALTER FUNCTION "public"."ensure_profile_v2"("p_leancloud_user_id" "text", "p_supabase_user_id" "uuid") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."ensure_profile_v2"("p_leancloud_user_id" "text", "p_supabase_user_id" "uuid") IS 'Ensure a profile exists for the given LeanCloud user; returns profile id with is_completed unchanged (defaults false).';
+COMMENT ON FUNCTION "public"."ensure_profile_v2"("p_leancloud_user_id" "text", "p_supabase_user_id" "uuid") IS 'Ensure a profile exists for the given LeanCloud user (external IM/display identity); returns profile id with is_completed unchanged (defaults false).';
 
 
 
@@ -1032,8 +1033,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "anon";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "service_role";
-
-
 
 
 

@@ -2,10 +2,21 @@ import { ok, error } from '../utils/responses.js';
 import { requireAuth, respondAuthError } from '../services/authService.js';
 import { authorize } from '../services/authorize.js';
 
+function requireLeancloudUserId(leancloudUserId) {
+  if (!leancloudUserId || String(leancloudUserId).trim().length === 0) {
+    const err = new Error('leancloudUserId is required');
+    err.code = 'LEAN_USER_ID_REQUIRED';
+    err.statusCode = 400;
+    throw err;
+  }
+  return String(leancloudUserId).trim();
+}
+
 async function ensureProfile(pool, leancloudUserId, supabaseUserId = null) {
+  const validated = requireLeancloudUserId(leancloudUserId);
   const { rows } = await pool.query(
     'select ensure_profile_v2($1, $2) as id',
-    [leancloudUserId, supabaseUserId]
+    [validated, supabaseUserId]
   );
   return rows[0]?.id;
 }
@@ -77,6 +88,9 @@ export default async function profileRoutes(app) {
         issuedJwt: auth.issuedJwt,
       });
     } catch (err) {
+      if (err?.statusCode) {
+        return error(reply, err.code || 'INVALID_REQUEST', err.message, err.statusCode);
+      }
       req.log.error(err);
       return error(reply, 'SERVER_ERROR', 'Failed to bootstrap profile', 500);
     }
@@ -134,6 +148,9 @@ export default async function profileRoutes(app) {
       );
       return ok(reply, { profileId, issuedJwt: auth.issuedJwt });
     } catch (err) {
+      if (err?.statusCode) {
+        return error(reply, err.code || 'INVALID_REQUEST', err.message, err.statusCode);
+      }
       req.log.error(err);
       const message = err.message || 'Failed to update profile';
       if (message.startsWith('INVALID_FIELD:')) {

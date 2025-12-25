@@ -11,16 +11,36 @@ const ORDER_STATUS = {
   CANCELLED_BY_TRAVELER: 'CANCELLED_BY_TRAVELER',
 };
 
+function requireLeancloudUserId(leancloudUserId) {
+  if (!leancloudUserId || String(leancloudUserId).trim().length === 0) {
+    const err = new Error('leancloudUserId is required');
+    err.code = 'LEAN_USER_ID_REQUIRED';
+    err.statusCode = 400;
+    throw err;
+  }
+  return String(leancloudUserId).trim();
+}
+
 async function ensureProfile(pool, leancloudUserId) {
+  const validated = requireLeancloudUserId(leancloudUserId);
   const { rows } = await pool.query(
     'select ensure_profile_v2($1, $2) as id',
-    [leancloudUserId, null]
+    [validated, null]
   );
   return rows[0]?.id;
 }
 
 async function fetchOrder(pool, orderId) {
-  const { rows } = await pool.query('select * from orders where id = $1', [orderId]);
+  const { rows } = await pool.query(
+    `select o.*,
+            host_profile.leancloud_user_id as "hostLeancloudUserId",
+            traveler_profile.leancloud_user_id as "travelerLeancloudUserId"
+     from orders o
+     left join profiles host_profile on host_profile.id = o.host_id
+     left join profiles traveler_profile on traveler_profile.id = o.traveler_id
+     where o.id = $1`,
+    [orderId]
+  );
   return rows[0] || null;
 }
 
@@ -94,7 +114,8 @@ async function handleCreate(pool, req, reply, actor) {
     'insert into order_status_logs(order_id, from_status, to_status, actor_id, actor_role) values ($1,$2,$3,$4,$5)',
     [order.id, null, order.status, profileId, 'TRAVELER']
   );
-  return ok(reply, order, 201);
+  const enriched = await fetchOrder(pool, order.id);
+  return ok(reply, enriched ?? order, 201);
 }
 
 async function handleMarkPaid(pool, req, reply, actor, orderId) {
@@ -117,7 +138,8 @@ async function handleMarkPaid(pool, req, reply, actor, orderId) {
     'insert into order_status_logs(order_id, from_status, to_status, actor_id, actor_role) values ($1,$2,$3,$4,$5)',
     [orderId, order.status, 'PENDING_HOST_CONFIRM', profileId, 'TRAVELER']
   );
-  return ok(reply, rows[0]);
+  const enriched = await fetchOrder(pool, rows[0].id);
+  return ok(reply, enriched ?? rows[0]);
 }
 
 async function handleAccept(pool, req, reply, actor, orderId) {
@@ -136,7 +158,8 @@ async function handleAccept(pool, req, reply, actor, orderId) {
     'insert into order_status_logs(order_id, from_status, to_status, actor_id, actor_role) values ($1,$2,$3,$4,$5)',
     [orderId, order.status, ORDER_STATUS.CONFIRMED, profileId, 'HOST']
   );
-  return ok(reply, rows[0]);
+  const enriched = await fetchOrder(pool, rows[0].id);
+  return ok(reply, enriched ?? rows[0]);
 }
 
 async function handleReject(pool, req, reply, actor, orderId) {
@@ -157,7 +180,8 @@ async function handleReject(pool, req, reply, actor, orderId) {
     'insert into order_status_logs(order_id, from_status, to_status, actor_id, actor_role, reason) values ($1,$2,$3,$4,$5,$6)',
     [orderId, order.status, ORDER_STATUS.CANCELLED_REFUNDED, profileId, 'HOST', reason]
   );
-  return ok(reply, rows[0]);
+  const enriched = await fetchOrder(pool, rows[0].id);
+  return ok(reply, enriched ?? rows[0]);
 }
 
 async function handleCancel(pool, req, reply, actor, orderId) {
@@ -178,7 +202,8 @@ async function handleCancel(pool, req, reply, actor, orderId) {
     'insert into order_status_logs(order_id, from_status, to_status, actor_id, actor_role, reason) values ($1,$2,$3,$4,$5,$6)',
     [orderId, order.status, ORDER_STATUS.CANCELLED_BY_TRAVELER, profileId, 'TRAVELER', reason]
   );
-  return ok(reply, rows[0]);
+  const enriched = await fetchOrder(pool, rows[0].id);
+  return ok(reply, enriched ?? rows[0]);
 }
 
 async function handleStart(pool, req, reply, actor, orderId) {
@@ -202,7 +227,8 @@ async function handleStart(pool, req, reply, actor, orderId) {
     'insert into service_logs(order_id, event_type, actor_id, actor_role) values ($1,$2,$3,$4)',
     [orderId, 'START', profileId, actorRole]
   );
-  return ok(reply, rows[0]);
+  const enriched = await fetchOrder(pool, rows[0].id);
+  return ok(reply, enriched ?? rows[0]);
 }
 
 async function handleEnd(pool, req, reply, actor, orderId) {
@@ -226,7 +252,8 @@ async function handleEnd(pool, req, reply, actor, orderId) {
     'insert into service_logs(order_id, event_type, actor_id, actor_role) values ($1,$2,$3,$4)',
     [orderId, 'END', profileId, actorRole]
   );
-  return ok(reply, rows[0]);
+  const enriched = await fetchOrder(pool, rows[0].id);
+  return ok(reply, enriched ?? rows[0]);
 }
 
 async function handleReview(pool, req, reply, actor, orderId) {
@@ -257,7 +284,13 @@ async function handleMyOrders(pool, req, reply, actor, statusFilter) {
   const profileId = await ensureProfile(pool, actor.userId);
   const params = [profileId];
   let sql =
-    'select id, experience_id, host_id, start_time, status, total_amount, currency, created_at from orders where traveler_id = $1';
+    `select o.id, o.experience_id, o.host_id, o.start_time, o.status, o.total_amount, o.currency, o.created_at,
+            host_profile.leancloud_user_id as "hostLeancloudUserId",
+            traveler_profile.leancloud_user_id as "travelerLeancloudUserId"
+     from orders o
+     left join profiles host_profile on host_profile.id = o.host_id
+     left join profiles traveler_profile on traveler_profile.id = o.traveler_id
+     where o.traveler_id = $1`;
   if (statusFilter) {
     params.push(statusFilter);
     sql += ' and status = $2';
@@ -271,7 +304,13 @@ async function handleHostOrders(pool, req, reply, actor, statusFilter) {
   const profileId = await ensureProfile(pool, actor.userId);
   const params = [profileId];
   let sql =
-    'select id, experience_id, traveler_id, start_time, status, total_amount, currency, created_at from orders where host_id = $1';
+    `select o.id, o.experience_id, o.traveler_id, o.start_time, o.status, o.total_amount, o.currency, o.created_at,
+            host_profile.leancloud_user_id as "hostLeancloudUserId",
+            traveler_profile.leancloud_user_id as "travelerLeancloudUserId"
+     from orders o
+     left join profiles host_profile on host_profile.id = o.host_id
+     left join profiles traveler_profile on traveler_profile.id = o.traveler_id
+     where o.host_id = $1`;
   if (statusFilter) {
     params.push(statusFilter);
     sql += ' and status = $2';
