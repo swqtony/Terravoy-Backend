@@ -1,0 +1,4 @@
+# Minimal seed list for EN safety checks
+illegal
+terror
+drugs

@@ -2,18 +2,20 @@ import { ok, error } from '../utils/responses.js';
 import { requireAuth, respondAuthError } from '../services/authService.js';
 import { authorize } from '../services/authorize.js';
 
-function requireLeancloudUserId(leancloudUserId) {
-  if (!leancloudUserId || String(leancloudUserId).trim().length === 0) {
-    const err = new Error('leancloudUserId is required');
-    err.code = 'LEAN_USER_ID_REQUIRED';
+const NICKNAME_MAX_LEN = 32;
+
+function requireUserId(userId) {
+  if (!userId || String(userId).trim().length === 0) {
+    const err = new Error('userId is required');
+    err.code = 'USER_ID_REQUIRED';
     err.statusCode = 400;
     throw err;
   }
-  return String(leancloudUserId).trim();
+  return String(userId).trim();
 }
 
-async function ensureProfile(pool, leancloudUserId, supabaseUserId = null) {
-  const validated = requireLeancloudUserId(leancloudUserId);
+async function ensureProfile(pool, userId, supabaseUserId = null) {
+  const validated = requireUserId(userId);
   const { rows } = await pool.query(
     'select ensure_profile_v2($1, $2) as id',
     [validated, supabaseUserId]
@@ -23,7 +25,7 @@ async function ensureProfile(pool, leancloudUserId, supabaseUserId = null) {
 
 async function fetchProfile(pool, profileId) {
   const { rows } = await pool.query(
-    `select id, is_completed, gender, age, first_language, second_language, home_city
+    `select id, leancloud_user_id, nickname, is_completed, gender, age, first_language, second_language, home_city
      from profiles where id = $1 limit 1`,
     [profileId]
   );
@@ -64,11 +66,8 @@ export default async function profileRoutes(app) {
       if (respondAuthError(err, reply)) return;
       throw err;
     }
-    const { leancloudUserId = null, supabaseUserId = null } = req.body || {};
+    const { supabaseUserId = null } = req.body || {};
     try {
-      if (leancloudUserId && leancloudUserId !== auth.userId) {
-        return error(reply, 'INVALID_REQUEST', 'leancloudUserId mismatch', 400);
-      }
       const profileId = await ensureProfile(pool, auth.userId, supabaseUserId);
       const profile = await fetchProfile(pool, profileId);
       if (!profile) {
@@ -107,44 +106,78 @@ export default async function profileRoutes(app) {
     }
     authorize(auth, 'profile:update');
     try {
-      const {
-        profileId: bodyProfileId = null,
-        gender,
-        age,
-        firstLanguage,
-        secondLanguage,
-        homeCity,
-      } = req.body || {};
-      const profileId = await ensureProfile(pool, auth.userId);
-      if (bodyProfileId && bodyProfileId !== profileId) {
-        return error(reply, 'INVALID_REQUEST', 'profileId mismatch', 400);
+      const { profileId = null, payload = null } = req.body || {};
+      if (!profileId || String(profileId).trim().length === 0) {
+        return error(reply, 'INVALID_REQUEST', 'profileId is required', 400);
       }
-      const requiredFields = {
-        gender: normalizeText(gender),
-        firstLanguage: normalizeText(firstLanguage),
-        secondLanguage: normalizeText(secondLanguage),
-        homeCity: normalizeText(homeCity),
-      };
-      const numericAge = Number(age);
-      const missing = [];
-      if (!requiredFields.gender) missing.push('gender');
-      if (!Number.isFinite(numericAge) || numericAge < 18 || numericAge > 120) missing.push('age');
-      if (!requiredFields.firstLanguage) missing.push('firstLanguage');
-      if (!requiredFields.secondLanguage) missing.push('secondLanguage');
-      if (!requiredFields.homeCity) missing.push('homeCity');
-      if (missing.length > 0) {
-        return error(reply, 'INVALID_REQUEST', 'Missing required fields', 400, { missingFields: missing });
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        return error(reply, 'INVALID_REQUEST', 'payload is required', 400);
       }
+
+      const profile = await fetchProfile(pool, profileId);
+      if (!profile) {
+        return error(reply, 'PROFILE_NOT_FOUND', 'Profile not found', 404);
+      }
+      if (profile.leancloud_user_id !== auth.userId) {
+        return error(reply, 'FORBIDDEN', 'profileId does not belong to user', 403);
+      }
+
+      const updates = {};
+      const invalidFields = [];
+      const nickname = Object.prototype.hasOwnProperty.call(payload, 'nickname')
+        ? normalizeText(payload.nickname)
+        : null;
+      if (nickname !== null) {
+        if (!nickname || nickname.length > NICKNAME_MAX_LEN) {
+          return error(reply, 'INVALID_NICKNAME', 'Invalid nickname', 400);
+        }
+        updates.nickname = nickname;
+      }
+
+      if (Object.prototype.hasOwnProperty.call(payload, 'gender')) {
+        const gender = normalizeText(payload.gender);
+        if (!gender) invalidFields.push('gender');
+        else updates.gender = gender;
+      }
+      if (Object.prototype.hasOwnProperty.call(payload, 'age')) {
+        const numericAge = Number(payload.age);
+        if (!Number.isFinite(numericAge) || numericAge < 18 || numericAge > 120) {
+          invalidFields.push('age');
+        } else {
+          updates.age = numericAge;
+        }
+      }
+      if (Object.prototype.hasOwnProperty.call(payload, 'firstLanguage')) {
+        const firstLanguage = normalizeText(payload.firstLanguage);
+        if (!firstLanguage) invalidFields.push('firstLanguage');
+        else updates.first_language = firstLanguage;
+      }
+      if (Object.prototype.hasOwnProperty.call(payload, 'secondLanguage')) {
+        const secondLanguage = normalizeText(payload.secondLanguage);
+        if (!secondLanguage) invalidFields.push('secondLanguage');
+        else updates.second_language = secondLanguage;
+      }
+      if (Object.prototype.hasOwnProperty.call(payload, 'homeCity')) {
+        const homeCity = normalizeText(payload.homeCity);
+        if (!homeCity) invalidFields.push('homeCity');
+        else updates.home_city = homeCity;
+      }
+
+      if (invalidFields.length > 0) {
+        return error(reply, 'INVALID_REQUEST', 'Missing required fields', 400, {
+          missingFields: invalidFields,
+        });
+      }
+
+      const fields = Object.keys(updates);
+      if (fields.length === 0) {
+        return error(reply, 'INVALID_REQUEST', 'payload is empty', 400);
+      }
+      const values = fields.map((key) => updates[key]);
+      const setClause = fields.map((key, idx) => `${key} = $${idx + 2}`);
       await pool.query(
-        'select update_profile_from_questionnaire($1,$2,$3,$4,$5,$6)',
-        [
-          profileId,
-          requiredFields.gender,
-          numericAge,
-          requiredFields.firstLanguage,
-          requiredFields.secondLanguage,
-          requiredFields.homeCity,
-        ]
+        `update profiles set ${setClause.join(', ')} where id = $1`,
+        [profileId, ...values]
       );
       return ok(reply, { profileId, issuedJwt: auth.issuedJwt });
     } catch (err) {

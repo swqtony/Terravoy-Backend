@@ -2,6 +2,7 @@ import jwt from 'jsonwebtoken';
 import { verifySessionToken, maskToken, LeancloudMisconfigError } from './leancloud.js';
 import { config } from '../config.js';
 import { verifyBearerToken } from '../utils/auth.js';
+import { verifyAccessToken } from '../plugins/authBearer.js';
 
 const isDev = (process.env.NODE_ENV || '').toLowerCase() !== 'production';
 
@@ -15,6 +16,10 @@ export class AuthError extends Error {
 
 function parseRole(req) {
   const roleHeader = (req.headers['x-terra-role'] || '').toString().toLowerCase();
+  const isProd = (process.env.NODE_ENV || '').toLowerCase() === 'production';
+  // In production, never trust role headers; rely on token claims instead.
+  if (isProd) return 'traveler';
+  if (roleHeader === 'admin') return 'admin';
   return roleHeader === 'host' ? 'host' : 'traveler';
 }
 
@@ -82,6 +87,21 @@ export async function requireAuth(req, reply) {
   // Local JWT path
   const bearer = parseBearer(req);
   if (bearer) {
+    const access = verifyAccessToken(bearer);
+    if (access) {
+      if (isDev && req.log) {
+        req.log.info({
+          event: 'auth.access',
+          reqId,
+          path,
+          actor: access.sub,
+          authMethod: 'access-token',
+        }, 'Authenticated via access token');
+      }
+      const role = parseRole(req);
+      req.user = { userId: access.sub, phone: access.phone || null };
+      return { userId: access.sub, role, tokenType: 'access' };
+    }
     const decoded = verifyLocalJwt(bearer);
     if (!decoded) {
       throw new AuthError('UNAUTHORIZED', 'Invalid bearer token', { reqId, path, authMethod: 'bearer' });

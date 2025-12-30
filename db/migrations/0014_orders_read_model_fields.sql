@@ -1,0 +1,17 @@
+ALTER TABLE public.orders
+  ADD COLUMN IF NOT EXISTS conversation_id text,
+  ADD COLUMN IF NOT EXISTS experience_title text,
+  ADD COLUMN IF NOT EXISTS experience_cover text,
+  ADD COLUMN IF NOT EXISTS city text,
+  ADD COLUMN IF NOT EXISTS meeting_point text,
+  ADD COLUMN IF NOT EXISTS language_preference text,
+  ADD COLUMN IF NOT EXISTS time_slot_label text,
+  ADD COLUMN IF NOT EXISTS tags jsonb DEFAULT '[]'::jsonb,
+  ADD COLUMN IF NOT EXISTS traveler_name text,
+  ADD COLUMN IF NOT EXISTS traveler_avatar text,
+  ADD COLUMN IF NOT EXISTS host_name text,
+  ADD COLUMN IF NOT EXISTS host_avatar text,
+  ADD COLUMN IF NOT EXISTS contact_phone text,
+  ADD COLUMN IF NOT EXISTS channel text DEFAULT 'backend',
+  ADD COLUMN IF NOT EXISTS visible_to_traveler boolean DEFAULT true,
+  ADD COLUMN IF NOT EXISTS visible_to_host boolean DEFAULT true;

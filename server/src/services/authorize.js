@@ -28,9 +28,18 @@ export function authorize(actor, action, resource = {}) {
       break;
 
     case 'orders:cancel':
-    case 'orders:review':
+    case 'orders:mark_paid':
       if (actor.role !== 'traveler') deny('Traveler role required');
       if (resource.travelerId && resource.travelerId !== actor.profileId) deny('Not order traveler');
+      break;
+
+    case 'orders:review':
+      if (actor.role !== 'traveler' && actor.role !== 'host') deny('Traveler or host role required');
+      if (resource.hostId && resource.travelerId) {
+        if (actor.profileId !== resource.hostId && actor.profileId !== resource.travelerId) {
+          deny('No access to order');
+        }
+      }
       break;
 
     case 'orders:start':
@@ -46,6 +55,12 @@ export function authorize(actor, action, resource = {}) {
     case 'orders:list:traveler':
     case 'orders:list:host':
       // Ownership enforced by queries; no extra role check.
+      break;
+
+    case 'payments:create':
+    case 'payments:confirm':
+      if (actor.role !== 'traveler') deny('Traveler role required');
+      if (resource.travelerId && resource.travelerId !== actor.profileId) deny('Not order traveler');
       break;
 
     default:
