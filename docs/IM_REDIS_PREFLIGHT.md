@@ -1,8 +1,8 @@
-# IM Redis Preflight
+# IM Redis Preflight (Go)
 
 ## Single Instance
 - Presence: gateway writes `im:online:{user_id}` with TTL 75s and refreshes every 30s.
-- Rate limit: API/gateway uses Redis sliding window (zset) per user/thread.
+- Rate limit: im-api/gateway uses Redis sliding window (zset) per user/thread.
 - Restart behavior: presence may drop briefly; TTL converges after reconnect.
 
 ## Multi Instance

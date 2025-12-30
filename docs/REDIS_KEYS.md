@@ -1,4 +1,4 @@
-# Redis Key Spec (IM)
+# Redis Key Spec (IM - Go)
 
 ## Presence
 - `im:online:{user_id}`
