@@ -6,6 +6,7 @@ import registerRoutes from './routes/index.js';
 import { startJobs } from './jobs/index.js';
 import cors from '@fastify/cors';
 import { checkDbCapabilities } from './services/capability.js';
+import { initRedis } from './services/redis.js';
 
 const logger = pino({ transport: { target: 'pino-pretty' } });
 const app = Fastify({
@@ -25,6 +26,37 @@ app.log.info({
   server: config.lean.server || '[unset]',
   appIdPrefix: (config.lean.appId || '').slice(0, 8),
 }, 'LeanCloud config loaded');
+
+app.log.info({
+  event: 'oss.config.loaded',
+  endpoint: config.oss.endpoint || '',
+  bucketPublic: config.oss.bucketPublic || '',
+  bucketPrivate: config.oss.bucketPrivate || '',
+  ready: Boolean(
+    config.oss.endpoint &&
+      config.oss.bucketPublic &&
+      config.oss.bucketPrivate
+  ),
+}, 'OSS config loaded (non-secret)');
+
+if (config.oss.useOssUploader) {
+  const missing = [];
+  if (!config.oss.endpoint) missing.push('OSS_ENDPOINT');
+  if (!config.oss.bucketPublic) missing.push('OSS_BUCKET_PUBLIC');
+  if (!config.oss.bucketPrivate) missing.push('OSS_BUCKET_PRIVATE');
+  if (!config.oss.accessKeyId) missing.push('OSS_ACCESS_KEY_ID');
+  if (!config.oss.accessKeySecret) missing.push('OSS_ACCESS_KEY_SECRET');
+  if (missing.length > 0) {
+    throw new Error(`OSS config missing: ${missing.join(', ')}`);
+  }
+}
+
+app.log.info(
+  { event: 'auth.sms.mode', mode: config.auth.smsMode },
+  'Auth SMS mode loaded'
+);
+
+await initRedis({ logger: app.log });
 
 // Log actor per request
 app.addHook('preHandler', async (req, _reply) => {

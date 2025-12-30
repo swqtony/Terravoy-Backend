@@ -7,17 +7,21 @@
     "start": "node src/app.js",
     "dev": "NODE_ENV=development node src/app.js",
     "db:migrate": "node scripts/migrate.js",
-    "contract:test": "node tests/contract_tests.js"
+    "contract:test": "node tests/contract_tests.js",
+    "media:test": "node tests/media_contract_tests.js",
+    "safety:test": "node tests/safety_report_tests.js"
   },
   "dependencies": {
     "@fastify/cors": "^9.0.1",
+    "ali-oss": "^6.21.0",
     "dotenv": "^16.4.5",
     "fastify": "^4.27.2",
     "fastify-plugin": "^4.5.1",
+    "jsonwebtoken": "^9.0.2",
     "node-fetch": "^3.3.2",
     "pg": "^8.12.0",
     "pino": "^9.4.0",
     "pino-pretty": "^10.3.0",
-    "jsonwebtoken": "^9.0.2"
+    "redis": "^4.6.13"
   }
 }

@@ -1,5 +1,13 @@
 
 services:
+  redis:
+    image: redis:7
+    container_name: terravoy-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    command: ["redis-server", "--appendonly", "no"]
+
   db:
     image: postgres:16
     container_name: terravoy-db
@@ -27,6 +35,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_started
     restart: unless-stopped
     environment:
       POSTGRES_HOST: db
@@ -34,6 +44,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-terravoy}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-terravoy_dev}
       POSTGRES_DB: ${POSTGRES_DB:-terravoy}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       PORT: ${PORT:-3000}
       TERRA_JWT_SECRET: ${TERRA_JWT_SECRET:-dev_terra_secret_change_me}
       TERRA_DEV_TOKEN: ${TERRA_DEV_TOKEN:-dev_terra_token}
@@ -62,6 +73,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_started
     restart: unless-stopped
     environment:
       POSTGRES_HOST: db
@@ -69,6 +82,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-terravoy}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-terravoy_dev}
       POSTGRES_DB: ${POSTGRES_DB:-terravoy}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       TERRA_JWT_SECRET: ${TERRA_JWT_SECRET:-dev_terra_secret_change_me}
       TERRA_DEV_TOKEN: ${TERRA_DEV_TOKEN:-dev_terra_token}
       LEAN_APP_ID: ${LEAN_APP_ID:-j66DPN5aeyYrMyytELnR2CHj-gzGzoHsz}
