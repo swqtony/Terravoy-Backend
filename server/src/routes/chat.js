@@ -441,4 +441,24 @@ export default async function chatRoutes(app) {
       return error(reply, 'SERVER_ERROR', 'Failed to fetch messages', 500);
     }
   });
+
+  app.get('/chat/threads/:id/permission', async (req, reply) => {
+    const auth = await requireImAuth(req, reply);
+    if (!auth) return;
+
+    const threadId = normalizeUuid(req.params?.id);
+    if (!threadId) {
+      return error(reply, 'INVALID_REQUEST', 'thread id is required', 400);
+    }
+    try {
+      const member = await fetchMember(pool, threadId, auth.userId);
+      if (!member) {
+        return error(reply, 'FORBIDDEN', 'Not a member', 403);
+      }
+      return ok(reply, { allowed: true });
+    } catch (err) {
+      req.log.error(err);
+      return error(reply, 'SERVER_ERROR', 'Failed to check permission', 500);
+    }
+  });
 }
