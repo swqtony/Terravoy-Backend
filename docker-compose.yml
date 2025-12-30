@@ -1,13 +1,5 @@
 
 services:
-  redis:
-    image: redis:7
-    container_name: terravoy-redis
-    restart: unless-stopped
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
-    command: ["redis-server", "--appendonly", "no"]
-
   db:
     image: postgres:16
     container_name: terravoy-db
@@ -35,8 +27,6 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      redis:
-        condition: service_started
     restart: unless-stopped
     environment:
       POSTGRES_HOST: db
@@ -44,7 +34,6 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-terravoy}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-terravoy_dev}
       POSTGRES_DB: ${POSTGRES_DB:-terravoy}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       PORT: ${PORT:-3000}
       TERRA_JWT_SECRET: ${TERRA_JWT_SECRET:-dev_terra_secret_change_me}
       TERRA_DEV_TOKEN: ${TERRA_DEV_TOKEN:-dev_terra_token}
@@ -73,8 +62,6 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      redis:
-        condition: service_started
     restart: unless-stopped
     environment:
       POSTGRES_HOST: db
@@ -82,7 +69,6 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-terravoy}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-terravoy_dev}
       POSTGRES_DB: ${POSTGRES_DB:-terravoy}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       TERRA_JWT_SECRET: ${TERRA_JWT_SECRET:-dev_terra_secret_change_me}
       TERRA_DEV_TOKEN: ${TERRA_DEV_TOKEN:-dev_terra_token}
       LEAN_APP_ID: ${LEAN_APP_ID:-j66DPN5aeyYrMyytELnR2CHj-gzGzoHsz}
@@ -94,55 +80,6 @@ services:
       MATCH_WORKER_BATCH: ${MATCH_WORKER_BATCH:-50}
       DEV_AUTH_BYPASS: ${DEV_AUTH_BYPASS:-0}
     command: ["npm", "run", "start"]
-
-  push-worker:
-    build:
-      context: .
-      dockerfile: ./server/Dockerfile
-    container_name: terravoy-push-worker
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_started
-    restart: unless-stopped
-    environment:
-      POSTGRES_HOST: db
-      POSTGRES_PORT: 5432
-      POSTGRES_USER: ${POSTGRES_USER:-terravoy}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-terravoy_dev}
-      POSTGRES_DB: ${POSTGRES_DB:-terravoy}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      FCM_SERVICE_ACCOUNT_JSON: ${FCM_SERVICE_ACCOUNT_JSON:-}
-      FCM_SERVICE_ACCOUNT_PATH: ${FCM_SERVICE_ACCOUNT_PATH:-}
-      PUSH_MAX_RETRIES: ${PUSH_MAX_RETRIES:-5}
-      PUSH_RETRY_BACKOFF_MS: ${PUSH_RETRY_BACKOFF_MS:-1000}
-    command: ["node", "src/workers/push_worker.js"]
-
-  im-gateway:
-    build:
-      context: ./im-gateway
-      dockerfile: ./Dockerfile
-    container_name: terravoy-im-gateway
-    depends_on:
-      api:
-        condition: service_started
-      redis:
-        condition: service_started
-    restart: unless-stopped
-    environment:
-      IM_WS_ADDR: :8081
-      IM_API_BASE_URL: ${IM_API_BASE_URL:-http://api:3000}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-dev_auth_jwt_secret}
-      IM_PRESENCE_TTL_SECONDS: ${IM_PRESENCE_TTL_SECONDS:-75}
-      IM_PRESENCE_REFRESH_SECONDS: ${IM_PRESENCE_REFRESH_SECONDS:-30}
-      IM_RATE_USER_MAX: ${IM_RATE_USER_MAX:-20}
-      IM_RATE_USER_WINDOW_MS: ${IM_RATE_USER_WINDOW_MS:-10000}
-      IM_RATE_THREAD_MAX: ${IM_RATE_THREAD_MAX:-30}
-      IM_RATE_THREAD_WINDOW_MS: ${IM_RATE_THREAD_WINDOW_MS:-10000}
-    ports:
-      - "${IM_WS_PORT:-8081}:8081"
 
 volumes:
   terravoy_pg:

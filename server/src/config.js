@@ -17,11 +17,6 @@ const config = {
     connectTimeoutMs: Number(process.env.REDIS_CONNECT_TIMEOUT_MS) || 5000,
     maxRetries: Number(process.env.REDIS_MAX_RETRIES) || 50,
   },
-  redis: {
-    url: process.env.REDIS_URL || 'redis://localhost:6379/0',
-    connectTimeoutMs: Number(process.env.REDIS_CONNECT_TIMEOUT_MS) || 5000,
-    maxRetries: Number(process.env.REDIS_MAX_RETRIES) || 50,
-  },
   terra: {
     jwtSecret: process.env.TERRA_JWT_SECRET || 'dev_terra_secret_change_me',
     devToken: process.env.TERRA_DEV_TOKEN || 'dev_terra_token',
@@ -100,12 +95,6 @@ const config = {
   },
   admin: {
     apiKey: process.env.ADMIN_API_KEY || '',
-  },
-  push: {
-    fcmServiceAccountJson: process.env.FCM_SERVICE_ACCOUNT_JSON || '',
-    fcmServiceAccountPath: process.env.FCM_SERVICE_ACCOUNT_PATH || '',
-    maxRetries: Number(process.env.PUSH_MAX_RETRIES) || 5,
-    baseBackoffMs: Number(process.env.PUSH_RETRY_BACKOFF_MS) || 1000,
   },
   flags: {
     devAuthBypass: process.env.DEV_AUTH_BYPASS === '1',

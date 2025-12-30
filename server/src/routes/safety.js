@@ -26,13 +26,13 @@ function getClientIp(req) {
   return req.ip || '';
 }
 
-async function enforceRateLimit({ userId, ip }) {
-  const userResult = await userLimiter.check(userId);
+function enforceRateLimit({ userId, ip }) {
+  const userResult = userLimiter.check(userId);
   if (!userResult.allowed) {
     return userResult;
   }
   const ipKey = `${ip || 'unknown'}:${userId}`;
-  const ipResult = await ipUserLimiter.check(ipKey);
+  const ipResult = ipUserLimiter.check(ipKey);
   return ipResult;
 }
 
@@ -48,7 +48,7 @@ export default async function safetyRoutes(app) {
     if (!auth) return;
 
     const ip = getClientIp(req);
-    const rate = await enforceRateLimit({ userId: auth.userId, ip });
+    const rate = enforceRateLimit({ userId: auth.userId, ip });
     if (!rate.allowed) {
       return reply.code(429).send({
         ok: false,

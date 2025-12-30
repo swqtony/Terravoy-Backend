@@ -4,7 +4,7 @@ import { config } from '../../config.js';
 
 const IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 const VIDEO_MAX_BYTES = 200 * 1024 * 1024;
-const ALLOWED_SCOPES = new Set(['post', 'experience', 'kyc', 'avatar', 'im_message']);
+const ALLOWED_SCOPES = new Set(['post', 'experience', 'kyc', 'avatar']);
 const ALLOWED_VISIBILITY = new Set(['public', 'private']);
 const ALLOWED_EXT = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'mp4', 'mov']);
 

@@ -1,21 +1,11 @@
-function traceId(reply) {
-  return reply?.request?.id || reply?.request?.traceId || null;
-}
-
 export function ok(reply, data = {}, status = 200) {
-  return reply.code(status).send({ success: true, data, traceId: traceId(reply) });
+  return reply.code(status).send({ success: true, data });
 }
 
 export function error(reply, code, message, status = 400, detail) {
   return reply
     .code(status)
-    .send({
-      success: false,
-      code,
-      message,
-      detail: detail ?? null,
-      traceId: traceId(reply),
-    });
+    .send({ success: false, code, message, detail: detail ?? null });
 }
 
 export function contentBlocked(reply, reasons = []) {
@@ -27,6 +17,5 @@ export function contentBlocked(reply, reasons = []) {
     success: false,
     code: 'CONTENT_BLOCKED',
     detail: { reasons: normalized },
-    traceId: traceId(reply),
   });
 }

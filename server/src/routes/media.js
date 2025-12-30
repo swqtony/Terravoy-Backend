@@ -11,7 +11,7 @@ import { logMediaAudit } from '../services/mediaAuditService.js';
 import { SlidingWindowRateLimiter } from '../utils/rateLimiter.js';
 import { config } from '../config.js';
 
-const ALLOWED_SCOPES = new Set(['post', 'experience', 'avatar', 'kyc', 'im_message']);
+const ALLOWED_SCOPES = new Set(['post', 'experience', 'avatar', 'kyc']);
 const ALLOWED_VISIBILITY = new Set(['public', 'private']);
 const ALLOWED_EXT = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'mp4']);
 const IMAGE_EXT = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif']);
@@ -111,7 +111,7 @@ function validateUploadInput({ scope, visibility, ext, size, mime }) {
 
 function parseObjectKey(objectKey) {
   const pattern =
-    /^(public|private)\/(post|experience|avatar|kyc|im_message)\/([^/]+)\/(\d{4})\/(\d{2})\/([0-9a-f-]{36})\.([a-z0-9]+)$/i;
+    /^(public|private)\/(post|experience|avatar|kyc)\/([^/]+)\/(\d{4})\/(\d{2})\/([0-9a-f-]{36})\.([a-z0-9]+)$/i;
   const match = objectKey.match(pattern);
   if (!match) {
     fail('INVALID_OBJECT_KEY', 'Invalid objectKey format');
@@ -170,16 +170,16 @@ function getClientIp(req) {
   return req.ip || '';
 }
 
-async function enforceRateLimit({ scope, userId, ip }) {
+function enforceRateLimit({ scope, userId, ip }) {
   const isKyc = scope === 'kyc';
-  const userResult = await (isKyc ? kycUserLimiter : userLimiter).check(userId);
+  const userResult = (isKyc ? kycUserLimiter : userLimiter).check(userId);
   if (!userResult.allowed) {
     fail('RATE_LIMITED', 'Too many requests', 429, {
       retryAfterSeconds: userResult.retryAfterSeconds,
     });
   }
   const ipKey = `${ip || 'unknown'}:${userId}`;
-  const ipResult = await (isKyc ? kycIpUserLimiter : ipUserLimiter).check(ipKey);
+  const ipResult = (isKyc ? kycIpUserLimiter : ipUserLimiter).check(ipKey);
   if (!ipResult.allowed) {
     fail('RATE_LIMITED', 'Too many requests', 429, {
       retryAfterSeconds: ipResult.retryAfterSeconds,
@@ -209,7 +209,7 @@ export default async function mediaRoutes(app) {
     const payload = parseUploadBody(req.body || {});
     try {
       validateUploadInput(payload);
-      await enforceRateLimit({ scope: payload.scope, userId: auth.userId, ip: getClientIp(req) });
+      enforceRateLimit({ scope: payload.scope, userId: auth.userId, ip: getClientIp(req) });
       const result = createUploadUrl({
         userId: auth.userId,
         scope: payload.scope,
