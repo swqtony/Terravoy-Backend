@@ -7,8 +7,10 @@ import { startJobs } from './jobs/index.js';
 import cors from '@fastify/cors';
 import { checkDbCapabilities } from './services/capability.js';
 import { initRedis } from './services/redis.js';
+import { register, httpRequestDurationMs } from './services/metrics.js';
 
-const logger = pino({ transport: { target: 'pino-pretty' } });
+const isProd = (process.env.NODE_ENV || '').toLowerCase() === 'production';
+const logger = isProd ? pino() : pino({ transport: { target: 'pino-pretty' } });
 const app = Fastify({
   logger,
 });
@@ -58,6 +60,11 @@ app.log.info(
 
 await initRedis({ logger: app.log });
 
+app.addHook('onRequest', async (req, reply) => {
+  req.traceId = req.id;
+  reply.header('x-trace-id', req.id);
+});
+
 // Log actor per request
 app.addHook('preHandler', async (req, _reply) => {
   const actor =
@@ -65,6 +72,18 @@ app.addHook('preHandler', async (req, _reply) => {
     req.headers['x-leancloud-userid'] ||
     'anonymous';
   req.log = req.log.child({ actor, path: req.url, method: req.method, reqId: req.id });
+});
+
+app.addHook('onResponse', async (req, reply) => {
+  const route = req.routerPath || req.url;
+  httpRequestDurationMs
+    .labels(req.method, route, String(reply.statusCode))
+    .observe(reply.elapsedTime || 0);
+});
+
+app.get('/metrics', async (_req, reply) => {
+  reply.header('Content-Type', register.contentType);
+  return reply.send(await register.metrics());
 });
 
 await checkDbCapabilities(pool);

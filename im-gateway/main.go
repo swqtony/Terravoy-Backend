@@ -237,8 +237,11 @@ func main() {
 }
 
 func setupLogger() {
-	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: time.RFC3339})
 	zerolog.TimeFieldFormat = time.RFC3339
+	if strings.ToLower(os.Getenv("NODE_ENV")) == "production" {
+		return
+	}
+	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: time.RFC3339})
 }
 
 func loadConfig() Config {
