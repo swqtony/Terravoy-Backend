@@ -20,6 +20,14 @@
   - Default: 30 messages / 10s
   - Purpose: per-thread send rate limit
 
+## Push Queue
+- `im:push:stream`
+  - Type: stream
+  - Purpose: offline push jobs consumed by im-worker
+- `im:push:dlq`
+  - Type: stream
+  - Purpose: failed push jobs after retries
+
 ## Capacity Estimate
 - Presence keys: ~active_online_users
 - Rate-limit keys: ~active_senders within window (user + thread)

@@ -124,6 +124,9 @@ func main() {
 		r.With(authMiddleware(cfg.AuthJWTSecret)).Get("/threads/{id}/permission", func(w http.ResponseWriter, r *http.Request) {
 			handlePermission(w, r, pool)
 		})
+		r.With(authMiddleware(cfg.AuthJWTSecret)).Get("/threads/{id}/members", func(w http.ResponseWriter, r *http.Request) {
+			handleThreadMembers(w, r, pool)
+		})
 		r.With(authMiddleware(cfg.AuthJWTSecret)).Post("/push/token", func(w http.ResponseWriter, r *http.Request) {
 			handlePushToken(w, r, pool)
 		})
@@ -731,6 +734,46 @@ func handlePermission(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool
 		return
 	}
 	writeJSON(w, r, http.StatusOK, map[string]any{"allowed": true})
+}
+
+func handleThreadMembers(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
+	userID := ctxValue(r, ctxUserID)
+	threadID := chi.URLParam(r, "id")
+	var exists bool
+	err := pool.QueryRow(r.Context(), `
+		select exists(
+			select 1 from chat_thread_members
+			where thread_id = $1 and user_id = $2
+		)`,
+		threadID, userID,
+	).Scan(&exists)
+	if err != nil || !exists {
+		writeError(w, r, http.StatusForbidden, "FORBIDDEN", "not a member")
+		return
+	}
+	rows, err := pool.Query(r.Context(), `
+		select user_id, role
+		from chat_thread_members
+		where thread_id = $1`, threadID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "SERVER_ERROR", "db error")
+		return
+	}
+	defer rows.Close()
+	members := []map[string]any{}
+	for rows.Next() {
+		var uid string
+		var role string
+		if err := rows.Scan(&uid, &role); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "SERVER_ERROR", "db error")
+			return
+		}
+		members = append(members, map[string]any{
+			"user_id": uid,
+			"role":    role,
+		})
+	}
+	writeJSON(w, r, http.StatusOK, map[string]any{"members": members})
 }
 
 func handlePushToken(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {

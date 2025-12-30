@@ -429,6 +429,9 @@ func (c *Conn) handleMsg(cfg Config, hub *Hub, redisClient *redis.Client, httpCl
 	if payload, err := json.Marshal(broadcast); err == nil {
 		hub.fanout(msg.ThreadID, payload)
 	}
+	if redisClient != nil {
+		go enqueuePushIfOffline(redisClient, httpClient, cfg.ApiBaseURL, c.token, msg.ThreadID, c.userID, resp.MsgID, resp.Seq)
+	}
 }
 
 func (c *Conn) handleRead(cfg Config, httpClient *http.Client, msg IncomingMessage) {
@@ -557,6 +560,65 @@ func apiPostRead(client *http.Client, baseURL, token, threadID string, lastRead 
 		return fmt.Errorf("read status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+func apiThreadMembers(client *http.Client, baseURL, token, threadID string) ([]string, error) {
+	url := fmt.Sprintf("%s/v1/threads/%s/members", strings.TrimRight(baseURL, "/"), threadID)
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("members status %d", resp.StatusCode)
+	}
+	var data struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Members []struct {
+				UserID string `json:"user_id"`
+			} `json:"members"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, m := range data.Data.Members {
+		out = append(out, m.UserID)
+	}
+	return out, nil
+}
+
+func enqueuePushIfOffline(redisClient *redis.Client, httpClient *http.Client, baseURL, token, threadID, senderID, msgID string, seq int64) {
+	ctx := context.Background()
+	members, err := apiThreadMembers(httpClient, baseURL, token, threadID)
+	if err != nil {
+		return
+	}
+	for _, memberID := range members {
+		if memberID == senderID {
+			continue
+		}
+		presenceKey := fmt.Sprintf("im:online:%s", memberID)
+		online, _ := redisClient.Get(ctx, presenceKey).Result()
+		if online != "" {
+			continue
+		}
+		_, _ = redisClient.XAdd(ctx, &redis.XAddArgs{
+			Stream: "im:push:stream",
+			Values: map[string]any{
+				"msg_id":          msgID,
+				"thread_id":       threadID,
+				"seq":             fmt.Sprintf("%d", seq),
+				"to_user_id":      memberID,
+				"attempt":         "0",
+				"available_at_ms": fmt.Sprintf("%d", time.Now().UnixMilli()),
+			},
+		}).Result()
+	}
 }
 
 func verifyJWT(tokenString, secret string) (string, error) {
