@@ -492,7 +492,7 @@ func (c *Conn) sendError(traceID, code, message string) {
 }
 
 func apiCheckPermission(client *http.Client, baseURL, token, threadID string) (bool, error) {
-	url := fmt.Sprintf("%s/chat/threads/%s/permission", strings.TrimRight(baseURL, "/"), threadID)
+	url := fmt.Sprintf("%s/v1/threads/%s/permission", strings.TrimRight(baseURL, "/"), threadID)
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := client.Do(req)
@@ -506,21 +506,21 @@ func apiCheckPermission(client *http.Client, baseURL, token, threadID string) (b
 type messageResp struct {
 	Success bool `json:"success"`
 	Data    struct {
-		MsgID     string `json:"msgId"`
+		MsgID     string `json:"msg_id"`
 		Seq       int64  `json:"seq"`
-		CreatedAt string `json:"createdAt"`
+		CreatedAt string `json:"created_at"`
 	} `json:"data"`
 }
 
 func apiPostMessage(client *http.Client, baseURL, token, threadID, clientMsgID, msgType string, content json.RawMessage) (*messageResp, error) {
 	payload := map[string]interface{}{
-		"threadId":    threadID,
-		"clientMsgId": clientMsgID,
+		"thread_id":    threadID,
+		"client_msg_id": clientMsgID,
 		"type":        msgType,
 		"content":     json.RawMessage(content),
 	}
 	body, _ := json.Marshal(payload)
-	url := fmt.Sprintf("%s/chat/messages", strings.TrimRight(baseURL, "/"))
+	url := fmt.Sprintf("%s/v1/messages", strings.TrimRight(baseURL, "/"))
 	req, _ := http.NewRequest("POST", url, strings.NewReader(string(body)))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
@@ -541,10 +541,10 @@ func apiPostMessage(client *http.Client, baseURL, token, threadID, clientMsgID, 
 
 func apiPostRead(client *http.Client, baseURL, token, threadID string, lastRead int64) error {
 	payload := map[string]interface{}{
-		"lastReadSeq": lastRead,
+		"last_read_seq": lastRead,
 	}
 	body, _ := json.Marshal(payload)
-	url := fmt.Sprintf("%s/chat/threads/%s/read", strings.TrimRight(baseURL, "/"), threadID)
+	url := fmt.Sprintf("%s/v1/threads/%s/read", strings.TrimRight(baseURL, "/"), threadID)
 	req, _ := http.NewRequest("POST", url, strings.NewReader(string(body)))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
