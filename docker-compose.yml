@@ -95,5 +95,29 @@ services:
       DEV_AUTH_BYPASS: ${DEV_AUTH_BYPASS:-0}
     command: ["npm", "run", "start"]
 
+  push-worker:
+    build:
+      context: .
+      dockerfile: ./server/Dockerfile
+    container_name: terravoy-push-worker
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-terravoy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-terravoy_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-terravoy}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      FCM_SERVICE_ACCOUNT_JSON: ${FCM_SERVICE_ACCOUNT_JSON:-}
+      FCM_SERVICE_ACCOUNT_PATH: ${FCM_SERVICE_ACCOUNT_PATH:-}
+      PUSH_MAX_RETRIES: ${PUSH_MAX_RETRIES:-5}
+      PUSH_RETRY_BACKOFF_MS: ${PUSH_RETRY_BACKOFF_MS:-1000}
+    command: ["node", "src/workers/push_worker.js"]
+
 volumes:
   terravoy_pg:

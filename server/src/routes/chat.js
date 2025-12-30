@@ -1,5 +1,7 @@
 import { ok, error } from '../utils/responses.js';
 import { requireAuth, respondAuthError } from '../services/authService.js';
+import { getRedisClient } from '../services/redis.js';
+import { enqueuePushJob } from '../services/pushQueue.js';
 
 const ALLOWED_TYPES = new Set(['match', 'order', 'support']);
 const ALLOWED_ROLES = new Set(['traveler', 'host']);
@@ -82,6 +84,29 @@ async function fetchThread(pool, threadId) {
     [threadId]
   );
   return rows[0] || null;
+}
+
+async function enqueuePushIfOffline({ pool, threadId, senderId, msgId, seq }) {
+  const client = getRedisClient();
+  if (!client) return;
+  const { rows } = await pool.query(
+    `select user_id
+     from chat_thread_members
+     where thread_id = $1 and user_id <> $2`,
+    [threadId, senderId]
+  );
+  for (const row of rows) {
+    const userId = row.user_id;
+    const presenceKey = `im:online:${userId}`;
+    const online = await client.get(presenceKey);
+    if (online) continue;
+    await enqueuePushJob({
+      msgId,
+      threadId,
+      seq,
+      toUserId: userId,
+    });
+  }
 }
 
 export default async function chatRoutes(app) {
@@ -321,10 +346,20 @@ export default async function chatRoutes(app) {
         [threadId, auth.userId, clientMsgId, nextSeq, type, content]
       );
       await client.query('commit');
+      const msgId = insertRes.rows[0].id;
+      const msgSeq = Number(insertRes.rows[0].seq || 0);
+      const msgCreatedAt = insertRes.rows[0].created_at;
+      enqueuePushIfOffline({
+        pool,
+        threadId,
+        senderId: auth.userId,
+        msgId,
+        seq: msgSeq,
+      }).catch((err) => req.log.warn({ err: err?.message }, 'enqueue push failed'));
       return ok(reply, {
-        msgId: insertRes.rows[0].id,
-        seq: Number(insertRes.rows[0].seq || 0),
-        createdAt: insertRes.rows[0].created_at,
+        msgId,
+        seq: msgSeq,
+        createdAt: msgCreatedAt,
       });
     } catch (err) {
       await client.query('rollback');

@@ -15,6 +15,7 @@ import safetyRoutes from './safety.js';
 import reportsRoutes from './reports.js';
 import hostCertificationsRoutes from './hostCertifications.js';
 import chatRoutes from './chat.js';
+import pushRoutes from './push.js';
 import { config } from '../config.js';
 
 export default function registerRoutes(app, prefix = '') {
@@ -39,4 +40,5 @@ export default function registerRoutes(app, prefix = '') {
   app.register(reportsRoutes, { prefix });
   app.register(hostCertificationsRoutes, { prefix });
   app.register(chatRoutes, { prefix });
+  app.register(pushRoutes, { prefix });
 }

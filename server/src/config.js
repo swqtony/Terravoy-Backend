@@ -101,6 +101,12 @@ const config = {
   admin: {
     apiKey: process.env.ADMIN_API_KEY || '',
   },
+  push: {
+    fcmServiceAccountJson: process.env.FCM_SERVICE_ACCOUNT_JSON || '',
+    fcmServiceAccountPath: process.env.FCM_SERVICE_ACCOUNT_PATH || '',
+    maxRetries: Number(process.env.PUSH_MAX_RETRIES) || 5,
+    baseBackoffMs: Number(process.env.PUSH_RETRY_BACKOFF_MS) || 1000,
+  },
   flags: {
     devAuthBypass: process.env.DEV_AUTH_BYPASS === '1',
     paymentsWebhookOnly: process.env.PAYMENTS_WEBHOOK_ONLY !== '0',
