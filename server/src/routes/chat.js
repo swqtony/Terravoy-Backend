@@ -3,6 +3,7 @@ import { requireAuth, respondAuthError } from '../services/authService.js';
 
 const ALLOWED_TYPES = new Set(['match', 'order', 'support']);
 const ALLOWED_ROLES = new Set(['traveler', 'host']);
+const ALLOWED_MESSAGE_TYPES = new Set(['text', 'image', 'system', 'order_event']);
 
 async function requireImAuth(req, reply) {
   try {
@@ -68,6 +69,17 @@ async function fetchMember(pool, threadId, userId) {
      from chat_thread_members
      where thread_id = $1 and user_id = $2`,
     [threadId, userId]
+  );
+  return rows[0] || null;
+}
+
+async function fetchThread(pool, threadId) {
+  const { rows } = await pool.query(
+    `select id, status, last_seq
+     from chat_threads
+     where id = $1
+     limit 1`,
+    [threadId]
   );
   return rows[0] || null;
 }
@@ -237,6 +249,161 @@ export default async function chatRoutes(app) {
     } catch (err) {
       req.log.error(err);
       return error(reply, 'SERVER_ERROR', 'Failed to update read state', 500);
+    }
+  });
+
+  app.post('/chat/messages', async (req, reply) => {
+    const auth = await requireImAuth(req, reply);
+    if (!auth) return;
+
+    const threadId = normalizeUuid(req.body?.threadId);
+    const clientMsgId = normalizeUuid(req.body?.clientMsgId);
+    const type = (req.body?.type || '').toString().trim();
+    const content = req.body?.content ?? null;
+    if (!threadId || !clientMsgId || !type) {
+      return error(reply, 'INVALID_REQUEST', 'threadId, clientMsgId, type are required', 400);
+    }
+    if (!ALLOWED_MESSAGE_TYPES.has(type)) {
+      return error(reply, 'INVALID_REQUEST', 'invalid message type', 400);
+    }
+
+    const thread = await fetchThread(pool, threadId);
+    if (!thread) {
+      return error(reply, 'NOT_FOUND', 'Thread not found', 404);
+    }
+    if (thread.status !== 'active') {
+      return error(reply, 'THREAD_INACTIVE', 'Thread not active', 409);
+    }
+
+    const member = await fetchMember(pool, threadId, auth.userId);
+    if (!member) {
+      return error(reply, 'FORBIDDEN', 'Not a member', 403);
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('begin');
+      const existing = await client.query(
+        `select id, seq, created_at
+         from chat_messages
+         where sender_id = $1 and client_msg_id = $2
+         limit 1`,
+        [auth.userId, clientMsgId]
+      );
+      if (existing.rows[0]) {
+        await client.query('commit');
+        return ok(reply, {
+          msgId: existing.rows[0].id,
+          seq: Number(existing.rows[0].seq || 0),
+          createdAt: existing.rows[0].created_at,
+        });
+      }
+
+      const seqRes = await client.query(
+        `update chat_threads
+         set last_seq = last_seq + 1,
+             last_message_at = now(),
+             updated_at = now()
+         where id = $1 and status = 'active'
+         returning last_seq`,
+        [threadId]
+      );
+      const nextSeq = Number(seqRes.rows[0]?.last_seq || 0);
+      if (!nextSeq) {
+        throw new Error('failed_to_allocate_seq');
+      }
+
+      const insertRes = await client.query(
+        `insert into chat_messages (
+           thread_id, sender_id, client_msg_id, seq, type, content
+         ) values ($1, $2, $3, $4, $5, $6)
+         returning id, seq, created_at`,
+        [threadId, auth.userId, clientMsgId, nextSeq, type, content]
+      );
+      await client.query('commit');
+      return ok(reply, {
+        msgId: insertRes.rows[0].id,
+        seq: Number(insertRes.rows[0].seq || 0),
+        createdAt: insertRes.rows[0].created_at,
+      });
+    } catch (err) {
+      await client.query('rollback');
+      if (err?.code === '23505') {
+        const { rows } = await pool.query(
+          `select id, seq, created_at
+           from chat_messages
+           where sender_id = $1 and client_msg_id = $2
+           limit 1`,
+          [auth.userId, clientMsgId]
+        );
+        if (rows[0]) {
+          return ok(reply, {
+            msgId: rows[0].id,
+            seq: Number(rows[0].seq || 0),
+            createdAt: rows[0].created_at,
+          });
+        }
+      }
+      req.log.error(err);
+      return error(reply, 'SERVER_ERROR', 'Failed to create message', 500);
+    } finally {
+      client.release();
+    }
+  });
+
+  app.get('/chat/threads/:id/messages', async (req, reply) => {
+    const auth = await requireImAuth(req, reply);
+    if (!auth) return;
+
+    const threadId = normalizeUuid(req.params?.id);
+    if (!threadId) {
+      return error(reply, 'INVALID_REQUEST', 'thread id is required', 400);
+    }
+    const afterSeq = Number(req.query?.afterSeq);
+    const beforeSeq = Number(req.query?.beforeSeq);
+    const limit = Math.min(Number(req.query?.limit || 50), 200);
+
+    const member = await fetchMember(pool, threadId, auth.userId);
+    if (!member) {
+      return error(reply, 'FORBIDDEN', 'Not a member', 403);
+    }
+
+    try {
+      const conditions = ['thread_id = $1'];
+      const params = [threadId];
+      if (Number.isFinite(afterSeq)) {
+        params.push(afterSeq);
+        conditions.push(`seq > $${params.length}`);
+      }
+      if (Number.isFinite(beforeSeq)) {
+        params.push(beforeSeq);
+        conditions.push(`seq < $${params.length}`);
+      }
+      params.push(limit);
+      const query = `
+        select id, thread_id, sender_id, client_msg_id, seq, type, content, created_at
+        from chat_messages
+        where ${conditions.join(' and ')}
+        order by seq desc
+        limit $${params.length}
+      `;
+      const { rows } = await pool.query(query, params);
+      const messages = rows
+        .reverse()
+        .map((row) => ({
+          id: row.id,
+          threadId: row.thread_id,
+          senderId: row.sender_id,
+          clientMsgId: row.client_msg_id,
+          seq: Number(row.seq || 0),
+          type: row.type,
+          content: row.content,
+          createdAt: row.created_at,
+        }));
+      return ok(reply, { messages });
+    } catch (err) {
+      req.log.error(err);
+      return error(reply, 'SERVER_ERROR', 'Failed to fetch messages', 500);
     }
   });
 }
