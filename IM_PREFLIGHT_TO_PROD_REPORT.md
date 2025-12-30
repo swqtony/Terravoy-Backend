@@ -1,33 +1,24 @@
-# IM Preflight to Prod Report
+# IM Preflight to Prod Report (Go)
 
-## Covered NEEDS_FIXES
-- Redis-based rate limit and presence keys
-- Explicit chat thread model and membership
-- Message storage with seq + idempotency
-- IM media upload scope
-- FCM push worker + device tokens
-- Gateway skeleton (auth/sub/msg/read/presence/limit/metrics)
-- Observability (JSON logs in prod, traceId, metrics)
+## Covered Items
+- Go im-api for threads/messages/media/push tokens
+- Go im-gateway for realtime WS + presence + rate limit
+- Go im-worker for FCM push + retention cleanup
+- Redis streams for push queue + DLQ
+- Postgres sequencing + idempotency
+- Prometheus metrics on im-api and gateway
 
-## Deferred / Risks
-- Go module dependencies not verified locally (Go toolchain missing in environment)
-- Multi-instance fanout uses Redis presence only (no cross-gateway routing)
-- Push payload is data-only; client routing behavior TBD
+## Remaining Risks
+- Go module dependencies not verified in this environment (no Go toolchain here)
+- FCM delivery depends on valid service account
 
-## One-Click Start
-- `docker compose up -d --build`
-- `docker compose exec api npm run db:migrate`
+## Start
+- `make im-up`
+- `make im-migrate`
 
-## E2E Acceptance
-1) Match thread:
-   - `POST /chat/threads/ensure` with `type=match`
-2) Order thread:
-   - `POST /chat/threads/ensure` with `type=order`
-3) Offline push:
-   - Register token → send message → verify worker log or DLQ
-4) Image message:
-   - `/v1/media/upload-url` → upload → `/v1/media/complete` → send `type=image`
-
-## Deployment Notes
-- Single instance: gateway + api + redis + db
-- Multi-instance: keep Redis shared for presence/limits; add LB for gateway
+## E2E
+- Ensure match/order thread
+- Send message + idempotency retry
+- Fetch afterSeq and confirm truncation flags
+- Read update
+- Push stream enqueue and worker consumption

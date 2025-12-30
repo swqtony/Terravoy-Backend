@@ -1,23 +1,14 @@
-# Observability
+# Observability (Go IM)
 
 ## Logs
-- Server: JSON in production, pretty in dev.
-- Gateway: JSON in production, pretty in dev.
-- Trace ID: `x-trace-id` response header + `traceId` in JSON body.
+- im-api/im-worker/im-gateway: JSON in production, pretty in dev
+- Trace ID: `X-Trace-Id` header is propagated by im-api
 
-## Server Metrics
-- `http_request_duration_ms{method,route,status}`
-- Default Node metrics via `prom-client`
-- `/metrics` endpoint
-
-## Gateway Metrics
-- `im_gateway_connections`
-- `im_gateway_msg_send_total`
-- `im_gateway_msg_send_errors_total`
-- `im_gateway_write_db_latency_ms`
-- `/metrics` endpoint
+## Metrics
+- im-api: `im_api_http_duration_ms` + default Go metrics
+- im-gateway: `im_gateway_connections`, `im_gateway_msg_send_total`, `im_gateway_msg_send_errors_total`, `im_gateway_write_db_latency_ms`
+- im-api `/metrics`, im-gateway `/metrics`
 
 ## Troubleshooting
-- Correlate API and gateway using `traceId`.
-- Check Redis availability for rate limit/presence.
-- Check push worker logs for DLQ activity (`im:push:dlq`).
+- Push failures: inspect `im:push:dlq`
+- Rate limit: check Redis availability

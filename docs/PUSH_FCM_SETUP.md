@@ -1,22 +1,20 @@
-# FCM Push Setup
+# FCM Push Setup (Go)
 
 ## Env
-- `FCM_SERVICE_ACCOUNT_JSON` (preferred, JSON string)
-- `FCM_SERVICE_ACCOUNT_PATH` (path to service account file)
+- `FCM_SERVICE_ACCOUNT_JSON` or `FCM_SERVICE_ACCOUNT_PATH`
 - `PUSH_MAX_RETRIES` (default 5)
 - `PUSH_RETRY_BACKOFF_MS` (default 1000)
 
 ## Token Registration
-- `POST /push/token`
+- `POST /v1/push/token`
   - body: `{ "platform": "android", "token": "FCM_DEVICE_TOKEN" }`
 
-## Verification Steps
-1) Configure FCM env vars
-2) Start stack: `docker compose up -d`
-3) Register token via `/push/token`
-4) Send IM message to offline user
-5) Check push worker logs for send result
+## Queue
+- Stream: `im:push:stream`
+- DLQ: `im:push:dlq`
 
-## Notes
-- Payload includes `thread_id`, `seq`, `msg_id`
-- Dead-letter stream: `im:push:dlq`
+## Verification
+1) `make im-up` + `make im-migrate`
+2) Register token
+3) Send message via gateway while receiver offline
+4) Observe worker logs or DLQ

@@ -12,4 +12,4 @@ im-migrate:
 \tIM_COMPOSE=$(IM_COMPOSE) im/scripts/migrate.sh
 
 im-smoke:
-\t@echo "Smoke tests are added in Phase 6"
+\tim/scripts/smoke.sh

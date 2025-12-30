@@ -1,40 +1,43 @@
-# IM Implementation Guide
+# IM Implementation Guide (Go)
 
 ## Architecture
-- API server (Node): threads/messages/media/push token APIs
-- Postgres: thread/message storage + idempotency
-- Redis: presence + rate limit + push queue
-- Push worker (Node): FCM delivery + retries + DLQ
-- IM Gateway (Go): WebSocket, auth, rate limit, fanout
+- im-api (Go): threads/messages/media/push token APIs
+- im-worker (Go): FCM push + retention cleanup
+- im-gateway (Go): WebSocket realtime gateway
+- Postgres: message storage + sequencing + idempotency
+- Redis: presence + rate limit + push stream
 
 ## Auth Model
-- IM APIs and gateway accept Bearer access token only (`AUTH_JWT_SECRET`)
-- Legacy LeanCloud session token is not supported for IM
+- IM accepts Bearer access token only (`AUTH_JWT_SECRET`)
+- Legacy LeanCloud session tokens are not accepted
 
 ## Local Startup
-1) `docker compose up -d --build`
-2) `docker compose exec api npm run db:migrate`
-3) Optional Redis smoke: `node tools/redis_rate_limit_smoke.js`
+1) `make im-up`
+2) `make im-migrate`
 
-## Gateway Access
-- WS: `ws://localhost:8081/ws`
-- Metrics: `http://localhost:8081/metrics`
+## Endpoints
+- im-api health: `http://localhost:8090/health`
+- im-api metrics: `http://localhost:8090/metrics`
+- gateway WS: `ws://localhost:8081/ws`
+- gateway metrics: `http://localhost:8081/metrics`
 
-## API Access
-- Threads: `POST /chat/threads/ensure`, `GET /chat/threads`
-- Messages: `POST /chat/messages`, `GET /chat/threads/:id/messages`
-- Media: `POST /v1/media/upload-url`, `POST /v1/media/complete`
-- Push token: `POST /push/token`
-- Metrics: `GET /metrics`
+## Core APIs (im-api)
+- `POST /v1/threads/ensure`
+- `GET /v1/threads` (includes `unread_count`, `last_message_preview`)
+- `GET /v1/threads/{id}/messages?afterSeq&beforeSeq&limit`
+- `POST /v1/threads/{id}/read`
+- `POST /v1/messages`
+- `POST /v1/push/token`
+- `POST /v1/media/upload-url` (scope=im_message)
 
 ## Acceptance Use Cases
-1) Ensure thread (match or order) and confirm idempotency
+1) Ensure thread (match + order) and confirm idempotency
 2) Gateway auth → sub → msg → ack
-3) Offline user push triggered (check push worker logs)
-4) Image message flow: upload-url → complete → send `type=image`
-5) Read state update: `read` event → unread count decreases
+3) Offline push: enqueue stream + worker consumes
+4) Image message: upload-url → send `type=image`
+5) Read state update: `read` event → unread decreases
 
 ## Troubleshooting
-- Redis down: rate limit/presence falls back (API) or disabled (gateway)
-- Gateway send failures: check `/metrics` + logs
-- Push failures: inspect Redis stream `im:push:dlq`
+- Redis down: presence/rate limit/push disabled
+- FCM failure: check `im:push:dlq`
+- Metrics: check `/metrics` on im-api and im-gateway
