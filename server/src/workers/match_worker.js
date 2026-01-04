@@ -1,6 +1,6 @@
 import pino from 'pino';
 import { pool } from '../db/pool.js';
-import { createOrReuseConversation } from '../services/leancloudConversation.js';
+import { ensureMatchThread } from '../services/imApi.js';
 
 const logger = pino({ transport: { target: 'pino-pretty' } });
 
@@ -36,9 +36,9 @@ async function fetchWaitingRequests(client, limit) {
 
 async function fetchPendingSessions(client, limit) {
   const { rows } = await client.query(
-    `select id, profile_a_id, profile_b_id, conversation_id
+    `select id, profile_a_id, profile_b_id, thread_id
      from match_sessions
-     where conversation_id is null
+     where thread_id is null
        and status in ('pending', 'matched')
      order by created_at desc
      limit $1`,
@@ -47,24 +47,34 @@ async function fetchPendingSessions(client, limit) {
   return rows;
 }
 
-async function fetchLeancloudUserIds(client, profileA, profileB) {
+async function fetchExternalUserIds(client, profileA, profileB) {
+  const ids = [profileA, profileB].filter(Boolean);
+  if (ids.length === 0) {
+    return { externalA: null, externalB: null };
+  }
   const { rows } = await client.query(
-    `select id, leancloud_user_id
+    `select id, user_id
      from profiles
      where id = any($1::uuid[])`,
-    [[profileA, profileB]]
+    [ids]
   );
-  const map = new Map(rows.map((r) => [r.id, r.leancloud_user_id]));
+  const map = new Map();
+  for (const row of rows) {
+    const userId = row.user_id || row.id;
+    if (row.id && userId) {
+      map.set(row.id, userId);
+    }
+  }
   return {
-    leanA: map.get(profileA) || null,
-    leanB: map.get(profileB) || null,
+    externalA: map.get(profileA) || profileA || null,
+    externalB: map.get(profileB) || profileB || null,
   };
 }
 
-async function attachConversation(client, sessionId, conversationId) {
+async function attachThread(client, sessionId, threadId) {
   await client.query(
-    'select attach_conversation_to_session($1,$2,$3)',
-    [sessionId, conversationId, true]
+    'update match_sessions set thread_id = $1 where id = $2',
+    [threadId, sessionId]
   );
   await client.query(
     "update match_sessions set status = 'matched' where id = $1 and status <> 'matched'",
@@ -116,48 +126,48 @@ async function runOnce() {
           sessionId: session.id,
         }, 'match worker matched');
 
-        if (session.conversation_id) {
-          await attachConversation(client, session.id, session.conversation_id);
+        if (session.thread_id) {
+          await attachThread(client, session.id, session.thread_id);
           attachedCount += 1;
           continue;
         }
 
-        const { leanA, leanB } = await fetchLeancloudUserIds(
+        const { externalA, externalB } = await fetchExternalUserIds(
           client,
           session.profile_a_id,
           session.profile_b_id
         );
-        if (!leanA || !leanB) {
+        if (!externalA || !externalB) {
           logger.warn({
-            event: 'worker.missing_leancloud',
+            event: 'worker.missing_profile',
             sessionId: session.id,
             profileA: session.profile_a_id,
             profileB: session.profile_b_id,
-          }, 'match worker missing leancloud user id');
+          }, 'match worker missing profile id');
           continue;
         }
 
-        const { conversationId, reused } = await createOrReuseConversation(
-          [leanA, leanB],
-          {
-            logger,
-            context: {
-              matchSessionId: session.id,
-              requestId: req.id,
-              selfLeancloudUserId: leanA,
-              peerLeancloudUserId: leanB,
-            },
-          }
-        );
+        const threadId = await ensureMatchThread({
+          sessionId: session.id,
+          memberA: externalA,
+          memberB: externalB,
+          actorUserId: externalA,
+        });
+        if (!threadId) {
+          logger.warn({
+            event: 'worker.thread.ensure_failed',
+            sessionId: session.id,
+          }, 'match worker ensure thread failed');
+          continue;
+        }
 
-        await attachConversation(client, session.id, conversationId);
+        await attachThread(client, session.id, threadId);
         attachedCount += 1;
         logger.info({
-          event: 'worker.conversation_attached',
+          event: 'worker.thread_attached',
           sessionId: session.id,
-          conversationId,
-          reused,
-        }, 'match worker conversation attached');
+          threadId,
+        }, 'match worker thread attached');
       } catch (err) {
         errorCount += 1;
         logger.error({
@@ -190,41 +200,42 @@ async function runOnce() {
           status: session.status,
           createdAt: session.created_at,
         }, 'match worker candidate');
-        const { leanA, leanB } = await fetchLeancloudUserIds(
+        const { externalA, externalB } = await fetchExternalUserIds(
           client,
           session.profile_a_id,
           session.profile_b_id
         );
-        if (!leanA || !leanB) {
+        if (!externalA || !externalB) {
           logger.warn({
-            event: 'worker.missing_leancloud',
+            event: 'worker.missing_profile',
             sessionId: session.id,
             profileA: session.profile_a_id,
             profileB: session.profile_b_id,
-          }, 'match worker missing leancloud user id');
+          }, 'match worker missing profile id');
           continue;
         }
 
-        const { conversationId, reused } = await createOrReuseConversation(
-          [leanA, leanB],
-          {
-            logger,
-            context: {
-              matchSessionId: session.id,
-              selfLeancloudUserId: leanA,
-              peerLeancloudUserId: leanB,
-            },
-          }
-        );
+        const threadId = await ensureMatchThread({
+          sessionId: session.id,
+          memberA: externalA,
+          memberB: externalB,
+          actorUserId: externalA,
+        });
+        if (!threadId) {
+          logger.warn({
+            event: 'worker.thread.ensure_failed',
+            sessionId: session.id,
+          }, 'match worker ensure thread failed');
+          continue;
+        }
 
-        await attachConversation(client, session.id, conversationId);
+        await attachThread(client, session.id, threadId);
         attachedCount += 1;
         logger.info({
-          event: 'worker.conversation_attached',
+          event: 'worker.thread_attached',
           sessionId: session.id,
-          conversationId,
-          reused,
-        }, 'match worker conversation attached');
+          threadId,
+        }, 'match worker thread attached');
       } catch (err) {
         errorCount += 1;
         logger.error({

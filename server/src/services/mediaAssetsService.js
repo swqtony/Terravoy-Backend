@@ -23,6 +23,7 @@ export async function createMediaAsset({
   status = 'active',
 }) {
   const resolvedUrl = url || (visibility === 'public' ? `${publicBaseUrl(bucket)}/${objectKey}` : '');
+  const resolvedProvider = provider || 'oss';
   const fields = [
     'url',
     'mime_type',
@@ -49,7 +50,7 @@ export async function createMediaAsset({
     ownerUserId || null,
     scope || null,
     visibility || null,
-    provider || null,
+    resolvedProvider,
     objectKey || null,
     bucket || null,
     checksum,

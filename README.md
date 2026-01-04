@@ -1,5 +1,7 @@
 # TerraVoy Backend
 
+IM WS smoke: `node scripts/im_smoke_ws.js`
+
 ## Media Upload (OSS)
 
 ### Environment

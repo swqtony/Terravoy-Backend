@@ -191,8 +191,7 @@ func handlePushMessage(ctx context.Context, rdb *redis.Client, pool *pgxpool.Poo
 	}
 	if fcm == nil {
 		log.Warn().Str("user_id", toUserID).Msg("FCM not configured")
-		_ = rdb.XAck(ctx, streamKey, groupName, msg.ID).Err()
-		return nil
+		return retryOrDLQ(ctx, rdb, msg, payload, attempt, cfg.PushMaxRetries, cfg.PushBackoffMs, "fcm_not_configured")
 	}
 	resp, err := fcm.SendMulticast(ctx, &messaging.MulticastMessage{
 		Tokens: tokens,
@@ -207,18 +206,7 @@ func handlePushMessage(ctx context.Context, rdb *redis.Client, pool *pgxpool.Poo
 		_ = rdb.XAck(ctx, streamKey, groupName, msg.ID).Err()
 		return nil
 	}
-	if attempt+1 >= cfg.PushMaxRetries {
-		payload["error"] = "push_failed"
-		payload["failed_at_ms"] = fmt.Sprintf("%d", time.Now().UnixMilli())
-		_, _ = rdb.XAdd(ctx, &redis.XAddArgs{Stream: dlqKey, Values: payload}).Result()
-		_ = rdb.XAck(ctx, streamKey, groupName, msg.ID).Err()
-		return nil
-	}
-	_ = rdb.XAck(ctx, streamKey, groupName, msg.ID).Err()
-	payload["attempt"] = strconv.Itoa(attempt + 1)
-	payload["available_at_ms"] = fmt.Sprintf("%d", time.Now().UnixMilli()+backoffMs(cfg.PushBackoffMs, attempt+1))
-	_, _ = rdb.XAdd(ctx, &redis.XAddArgs{Stream: streamKey, Values: payload}).Result()
-	return nil
+	return retryOrDLQ(ctx, rdb, msg, payload, attempt, cfg.PushMaxRetries, cfg.PushBackoffMs, "push_failed")
 }
 
 func fetchDeviceTokens(ctx context.Context, pool *pgxpool.Pool, userID string) ([]string, error) {
@@ -239,6 +227,21 @@ func fetchDeviceTokens(ctx context.Context, pool *pgxpool.Pool, userID string) (
 		tokens = append(tokens, token)
 	}
 	return tokens, nil
+}
+
+func retryOrDLQ(ctx context.Context, rdb *redis.Client, msg redis.XMessage, payload map[string]string, attempt int, maxRetries int, backoffBase int, errCode string) error {
+	if attempt+1 >= maxRetries {
+		payload["error"] = errCode
+		payload["failed_at_ms"] = fmt.Sprintf("%d", time.Now().UnixMilli())
+		_, _ = rdb.XAdd(ctx, &redis.XAddArgs{Stream: dlqKey, Values: payload}).Result()
+		_ = rdb.XAck(ctx, streamKey, groupName, msg.ID).Err()
+		return nil
+	}
+	_ = rdb.XAck(ctx, streamKey, groupName, msg.ID).Err()
+	payload["attempt"] = strconv.Itoa(attempt + 1)
+	payload["available_at_ms"] = fmt.Sprintf("%d", time.Now().UnixMilli()+backoffMs(backoffBase, attempt+1))
+	_, _ = rdb.XAdd(ctx, &redis.XAddArgs{Stream: streamKey, Values: payload}).Result()
+	return nil
 }
 
 func backoffMs(base int, attempt int) int64 {

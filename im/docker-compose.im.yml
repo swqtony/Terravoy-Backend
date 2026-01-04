@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-terravoy_dev}
       POSTGRES_DB: ${POSTGRES_DB:-terravoy}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - terravoy_im_pg:/var/lib/postgresql/data
       - ../db/migrations:/migrations:ro
@@ -26,31 +26,39 @@ services:
     ports:
       - "${REDIS_PORT:-6379}:6379"
     command: ["redis-server", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   im-api:
     build:
       context: ./im-api
       dockerfile: ./Dockerfile
+      args:
+        GOPROXY: ${GOPROXY:-https://goproxy.io,direct}
+        GOSUMDB: ${GOSUMDB:-sum.golang.google.cn}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
     container_name: terravoy-im-api
+    env_file:
+      - ../.env
     depends_on:
       im-db:
         condition: service_healthy
       im-redis:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
     environment:
       IM_API_ADDR: :8090
       IM_DB_DSN: ${IM_DB_DSN:-postgres://terravoy:terravoy_dev@im-db:5432/terravoy?sslmode=disable}
       IM_REDIS_URL: ${IM_REDIS_URL:-redis://im-redis:6379/0}
       AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-dev_auth_jwt_secret}
+      NODE_ENV: production
       IM_RETENTION_MATCH_DAYS: ${IM_RETENTION_MATCH_DAYS:-14}
       IM_RETENTION_ORDER_DAYS: ${IM_RETENTION_ORDER_DAYS:-180}
-      OSS_ENDPOINT: ${OSS_ENDPOINT:-}
-      OSS_BUCKET_PUBLIC: ${OSS_BUCKET_PUBLIC:-}
-      OSS_ACCESS_KEY_ID: ${OSS_ACCESS_KEY_ID:-}
-      OSS_ACCESS_KEY_SECRET: ${OSS_ACCESS_KEY_SECRET:-}
-      OSS_PUBLIC_BASE_URL: ${OSS_PUBLIC_BASE_URL:-}
-      OSS_UPLOAD_EXPIRES_SECONDS: ${OSS_UPLOAD_EXPIRES_SECONDS:-900}
     ports:
       - "${IM_API_PORT:-8090}:8090"
 
@@ -58,17 +66,24 @@ services:
     build:
       context: ./im-worker
       dockerfile: ./Dockerfile
+      args:
+        GOPROXY: ${GOPROXY:-https://goproxy.io,direct}
+        GOSUMDB: ${GOSUMDB:-sum.golang.google.cn}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
     container_name: terravoy-im-worker
     depends_on:
       im-db:
         condition: service_healthy
       im-redis:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
     environment:
       IM_DB_DSN: ${IM_DB_DSN:-postgres://terravoy:terravoy_dev@im-db:5432/terravoy?sslmode=disable}
       IM_REDIS_URL: ${IM_REDIS_URL:-redis://im-redis:6379/0}
       AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-dev_auth_jwt_secret}
+      NODE_ENV: production
       IM_RETENTION_MATCH_DAYS: ${IM_RETENTION_MATCH_DAYS:-14}
       IM_RETENTION_ORDER_DAYS: ${IM_RETENTION_ORDER_DAYS:-180}
       FCM_SERVICE_ACCOUNT_JSON: ${FCM_SERVICE_ACCOUNT_JSON:-}
@@ -80,12 +95,18 @@ services:
     build:
       context: ../im-gateway
       dockerfile: ./Dockerfile
+      args:
+        GOPROXY: ${GOPROXY:-https://goproxy.io,direct}
+        GOSUMDB: ${GOSUMDB:-sum.golang.google.cn}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
     container_name: terravoy-im-gateway
     depends_on:
       im-api:
         condition: service_started
       im-redis:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
     environment:
       IM_WS_ADDR: :8081

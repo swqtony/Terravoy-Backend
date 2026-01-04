@@ -139,15 +139,16 @@ export default async function discoverPlazaRoutes(app) {
       }
     }
 
+    const images = Array.isArray(payload.images) ? payload.images : [];
     const params = [
       auth.userId,
       (payload.authorName || '').toString(),
       (payload.authorAvatarUrl || '').toString(),
       payload.city ? payload.city.toString() : null,
       content,
-      Array.isArray(payload.images) ? payload.images : [],
-      payload.video ?? null,
-      tags,
+      JSON.stringify(images),
+      payload.video ? JSON.stringify(payload.video) : null,
+      JSON.stringify(tags),
     ];
 
     try {

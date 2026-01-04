@@ -2,20 +2,20 @@ import { ok, error } from '../utils/responses.js';
 import { requireAuth, respondAuthError } from '../services/authService.js';
 import { authorize } from '../services/authorize.js';
 import { fetchPrefsForMatch, upsertPrefsForMatch } from '../services/preferencesService.js';
-import { createOrReuseConversation } from '../services/leancloudConversation.js';
+import { ensureMatchThread } from '../services/imApi.js';
 
-function requireLeancloudUserId(leancloudUserId) {
-  if (!leancloudUserId || String(leancloudUserId).trim().length === 0) {
-    const err = new Error('leancloudUserId is required');
-    err.code = 'LEAN_USER_ID_REQUIRED';
+function requireExternalUserId(externalUserId) {
+  if (!externalUserId || String(externalUserId).trim().length === 0) {
+    const err = new Error('externalUserId is required');
+    err.code = 'EXTERNAL_USER_ID_REQUIRED';
     err.statusCode = 400;
     throw err;
   }
-  return String(leancloudUserId).trim();
+  return String(externalUserId).trim();
 }
 
-async function ensureProfile(pool, leancloudUserId) {
-  const validated = requireLeancloudUserId(leancloudUserId);
+async function ensureProfile(pool, externalUserId) {
+  const validated = requireExternalUserId(externalUserId);
   const { rows } = await pool.query(
     'select ensure_profile_v2($1, $2) as id',
     [validated, null]
@@ -25,7 +25,7 @@ async function ensureProfile(pool, leancloudUserId) {
 
 async function fetchProfile(pool, profileId) {
   const { rows } = await pool.query(
-    `select id, leancloud_user_id, is_completed, gender, age,
+    `select id, is_completed, gender, age,
             first_language, second_language, home_city
      from profiles where id = $1`,
     [profileId]
@@ -112,29 +112,62 @@ function normalizeCityScope(val) {
   return typeof val === 'string' && val.length > 0 ? val : 'Strict';
 }
 
+async function fetchUserIdByProfileId(pool, profileId) {
+  if (!profileId) return null;
+  const { rows } = await pool.query(
+    `select user_id
+     from profiles
+     where id = $1
+     limit 1`,
+    [profileId]
+  );
+  return rows[0]?.user_id || null;
+}
+
+async function fetchUserIdMap(pool, profileIds) {
+  const ids = (profileIds || []).filter(Boolean);
+  if (ids.length === 0) return new Map();
+  const { rows } = await pool.query(
+    `select id, user_id
+     from profiles
+     where id = any($1::uuid[])`,
+    [ids]
+  );
+  const map = new Map();
+  for (const row of rows) {
+    const userId = row.user_id || row.id;
+    if (row.id && userId) {
+      map.set(row.id, userId);
+    }
+  }
+  return map;
+}
+
 async function buildMatchedResponse(pool, sessionRow, profileId, requestId) {
   const isA = sessionRow.profile_a_id === profileId;
   const otherProfileId = isA ? sessionRow.profile_b_id : sessionRow.profile_a_id;
   if (!otherProfileId || otherProfileId === profileId) return null;
-  const otherProfile = await fetchOtherProfile(pool, otherProfileId);
-  const otherLean = otherProfile?.leancloud_user_id ?? null;
+  const otherExternalUserId =
+    (await fetchUserIdByProfileId(pool, otherProfileId)) || otherProfileId;
   const matchSessionId = sessionRow.id || sessionRow.session_id || null;
   const matchRequestId =
     requestId ||
     sessionRow.request_a_id ||
     sessionRow.request_b_id ||
     null;
-  const conversationId = sessionRow.conversation_id ?? null;
-  if (!otherLean) {
+  const threadId = sessionRow.thread_id ?? null;
+  if (!otherExternalUserId) {
     return {
       status: 'profile_incomplete',
       errorCode: 'PEER_LEANCLOUD_ID_MISSING',
-      message: 'peerLeancloudUserId missing',
+      message: 'peerUserId missing',
       matchSessionId,
       matchRequestId,
+      peerUserId: null,
+      otherUserId: null,
       peerLeancloudUserId: null,
-      conversationId,
-      reusedConversation: !!conversationId,
+      threadId,
+      reusedThread: !!threadId,
       serverTime: new Date().toISOString(),
       selfProfileId: profileId,
       otherProfileId,
@@ -144,9 +177,11 @@ async function buildMatchedResponse(pool, sessionRow, profileId, requestId) {
     status: 'matched',
     matchSessionId,
     matchRequestId,
-    peerLeancloudUserId: otherLean,
-    conversationId,
-    reusedConversation: !!conversationId,
+    peerUserId: otherExternalUserId,
+    otherUserId: otherExternalUserId,
+    peerLeancloudUserId: otherExternalUserId,
+    threadId,
+    reusedThread: !!threadId,
     serverTime: new Date().toISOString(),
     session: sessionRow,
     selfProfileId: profileId,
@@ -163,10 +198,11 @@ function isSessionForRequest(sessionRow, requestId) {
 }
 
 function isStrongMatched(data) {
+  const peerUserId = data.peerUserId || data.peerLeancloudUserId;
   return (
     data.matchSessionId &&
-    data.peerLeancloudUserId &&
-    data.conversationId
+    peerUserId &&
+    data.threadId
   );
 }
 
@@ -174,8 +210,8 @@ function listMissingFields(data) {
   const missing = [];
   if (!data.matchSessionId) missing.push('matchSessionId');
   if (!data.matchRequestId) missing.push('matchRequestId');
-  if (!data.peerLeancloudUserId) missing.push('peerLeancloudUserId');
-  if (!data.conversationId) missing.push('conversationId');
+  if (!data.peerUserId && !data.peerLeancloudUserId) missing.push('peerUserId');
+  if (!data.threadId) missing.push('threadId');
   return missing;
 }
 
@@ -195,10 +231,10 @@ function resolvePeerFromSession(sessionRow, requestId) {
 }
 
 async function resolvePeerLeanId(pool, data) {
+  if (data?.peerUserId) return data.peerUserId;
   if (data?.peerLeancloudUserId) return data.peerLeancloudUserId;
   if (!data?.otherProfileId) return null;
-  const otherProfile = await fetchOtherProfile(pool, data.otherProfileId);
-  return otherProfile?.leancloud_user_id ?? null;
+  return data.otherProfileId;
 }
 
 async function markSessionMatched(pool, sessionId) {
@@ -209,40 +245,39 @@ async function markSessionMatched(pool, sessionId) {
   );
 }
 
-async function attachConversationForMatch(params) {
-  const {
-    pool,
-    sessionId,
-    selfLeancloudUserId,
-    peerLeancloudUserId,
-    logger,
-    context,
-  } = params;
-  if (!sessionId || !selfLeancloudUserId || !peerLeancloudUserId) return null;
-  const { rows: existingRows } = await pool.query(
-    'select conversation_id from match_sessions where id = $1 limit 1',
-    [sessionId]
-  );
-  const existingConversationId = existingRows[0]?.conversation_id ?? null;
-  const { conversationId, reused } = await createOrReuseConversation(
-    [selfLeancloudUserId, peerLeancloudUserId],
-    { logger, context }
-  );
+async function ensureThreadForSession({ pool, sessionRow, logger, context }) {
+  if (!sessionRow) return null;
+  if (sessionRow.thread_id) return sessionRow.thread_id;
+  if (!sessionRow.profile_a_id || !sessionRow.profile_b_id) return null;
+  const userIdMap = await fetchUserIdMap(pool, [
+    sessionRow.profile_a_id,
+    sessionRow.profile_b_id,
+  ]);
+  const memberA =
+    userIdMap.get(sessionRow.profile_a_id) || sessionRow.profile_a_id;
+  const memberB =
+    userIdMap.get(sessionRow.profile_b_id) || sessionRow.profile_b_id;
+  const threadId = await ensureMatchThread({
+    sessionId: sessionRow.id,
+    memberA,
+    memberB,
+    actorUserId: memberA,
+  });
+  if (!threadId) return null;
   await pool.query(
-    'select attach_conversation_to_session($1,$2,$3) as session',
-    [sessionId, conversationId, true]
+    'update match_sessions set thread_id = $1 where id = $2',
+    [threadId, sessionRow.id]
   );
-  const updated = existingConversationId !== conversationId;
+  sessionRow.thread_id = threadId;
   if (logger?.info) {
     logger.info({
-      event: 'conversation.attached',
-      conversationId,
-      reused,
-      updated,
+      event: 'thread.attached',
+      threadId,
+      sessionId: sessionRow.id,
       ...context,
-    }, 'LeanCloud conversation attached');
+    }, 'IM thread attached');
   }
-  return { conversationId, reused, updated };
+  return threadId;
 }
 
 export default async function matchRoutes(app) {
@@ -271,11 +306,6 @@ export default async function matchRoutes(app) {
     }
     try {
       const profileId = await ensureProfile(pool, auth.userId);
-      const headerLeanId =
-        (req.headers['x-leancloud-user-id'] ||
-          req.headers['x-leancloud-userid'] ||
-          '')?.toString?.() ||
-        '';
       authorize({ ...auth, profileId }, 'match:start');
       const profile = await fetchProfile(pool, profileId);
       if (!profile) {
@@ -350,20 +380,20 @@ export default async function matchRoutes(app) {
       );
       const latestReq = await getLatestRequest(pool, profileId);
       const latestRequestId = latestReq?.id ?? null;
-      if (auth.userId && headerLeanId && auth.userId !== headerLeanId) {
-        req.log.warn({
-          event: 'auth.leancloud_mismatch',
-          actor: auth.userId,
-          headerLeancloudUserId: headerLeanId,
-          requestId: latestRequestId,
-          path: req.url,
-        });
-      }
       const sessionRow = sessionRows[0] || null;
       if (sessionRow && process.env.NODE_ENV !== 'production') {
         req.log.debug({ event: 'match-start.sessionRow', sessionRow }, 'match-start raw sessionRow');
       }
       if (sessionRow) {
+        await ensureThreadForSession({
+          pool,
+          sessionRow,
+          logger: req.log,
+          context: {
+            requestId: latestRequestId,
+            sessionId: sessionRow.id,
+          },
+        });
         const data = await buildMatchedResponse(pool, sessionRow, profileId, latestRequestId);
         if (!data) {
           const hasProfileA = !!sessionRow.profile_a_id;
@@ -382,25 +412,21 @@ export default async function matchRoutes(app) {
             ? await fetchOtherProfile(pool, otherProfileId)
             : null;
           const peerProfileMissing = Boolean(otherProfileId && !peerProfile);
-          const leancloudMismatch =
-            auth.userId && headerLeanId && auth.userId !== headerLeanId;
-          const invalidReason = leancloudMismatch
-            ? 'leancloud_user_mismatch'
-            : !sessionRow
-              ? 'session_not_found'
-              : !hasProfileA || !hasProfileB
-                ? 'session_profiles_missing'
-                : !inSession
-                  ? 'self_profile_not_in_session'
-                  : sameProfiles
-                    ? 'self_peer_same_profile'
-                    : peerProfileMissing
-                      ? 'peer_profile_not_found'
-                      : 'unknown';
+          const invalidReason = !sessionRow
+            ? 'session_not_found'
+            : !hasProfileA || !hasProfileB
+              ? 'session_profiles_missing'
+              : !inSession
+                ? 'self_profile_not_in_session'
+                : sameProfiles
+                  ? 'self_peer_same_profile'
+                  : peerProfileMissing
+                    ? 'peer_profile_not_found'
+                    : 'unknown';
           req.log.warn({
             event: 'match-start.invalid_or_self_match_context',
             actor: auth.userId,
-            headerLeancloudUserId: headerLeanId || null,
+            headerLeancloudUserId: null,
             requestId: latestRequestId,
             selfProfileId: profileId,
             sessionLookup: {
@@ -415,7 +441,7 @@ export default async function matchRoutes(app) {
                   request_b_id: sessionRow.request_b_id,
                   profile_a_id: sessionRow.profile_a_id,
                   profile_b_id: sessionRow.profile_b_id,
-                  conversation_id: sessionRow.conversation_id,
+                  thread_id: sessionRow.thread_id,
                   status: sessionRow.status,
                 }
               : null,
@@ -461,7 +487,7 @@ export default async function matchRoutes(app) {
             sessionId: sessionRow.id,
             requestA: sessionRow.request_a_id,
             requestB: sessionRow.request_b_id,
-            conversationId: sessionRow.conversation_id,
+            threadId: sessionRow.thread_id,
           }, 'match-start downgrade to waiting');
         }
         }
@@ -471,9 +497,11 @@ export default async function matchRoutes(app) {
         status: 'waiting',
         matchRequestId: activeReq?.id ?? latestRequestId ?? null,
         matchSessionId: null,
+        peerUserId: null,
+        otherUserId: null,
         peerLeancloudUserId: null,
-        conversationId: null,
-        reusedConversation: false,
+        threadId: null,
+        reusedThread: false,
         serverTime: new Date().toISOString(),
         issuedJwt: auth.issuedJwt,
       };
@@ -502,20 +530,6 @@ export default async function matchRoutes(app) {
     }
     try {
       const profileId = await ensureProfile(pool, auth.userId);
-      const headerLeanId =
-        (req.headers['x-leancloud-user-id'] ||
-          req.headers['x-leancloud-userid'] ||
-          '')?.toString?.() ||
-        '';
-      if (auth.userId && headerLeanId && auth.userId !== headerLeanId) {
-        req.log.warn({
-          event: 'auth.leancloud_mismatch',
-          actor: auth.userId,
-          headerLeancloudUserId: headerLeanId,
-          requestId,
-          path: req.url,
-        });
-      }
       const { rows: reqRows } = await pool.query(
         'select * from match_requests where id = $1 limit 1',
         [requestId]
@@ -524,6 +538,23 @@ export default async function matchRoutes(app) {
       authorize({ ...auth, profileId }, 'match:poll', { ownerProfileId: ownerRow?.profile_id });
       if (!ownerRow) {
         return error(reply, 'NOT_FOUND', 'Request not found', 404);
+      }
+      if (ownerRow.status === 'waiting') {
+        const { rows: touchedRows } = await pool.query(
+          'select * from touch_match_request($1,$2)',
+          [requestId, profileId]
+        );
+        const touched = touchedRows[0] || null;
+        if (!touched) {
+          return ok(reply, {
+            status: 'expired',
+            requestId,
+            profileId,
+            requestStatus: ownerRow.status,
+            reason: 'request_expired',
+            issuedJwt: auth.issuedJwt,
+          });
+        }
       }
       const activeReq = await getActiveRequest(pool, profileId);
       if (activeReq && activeReq.id !== requestId) {
@@ -558,13 +589,22 @@ export default async function matchRoutes(app) {
         hit: Boolean(sessionRow),
         sessionId: sessionRow?.id ?? null,
         sessionStatus: sessionRow?.status ?? null,
-        conversationIdPresent: Boolean(sessionRow?.conversation_id),
-        conversationIdPrefix: sessionRow?.conversation_id
-          ? String(sessionRow.conversation_id).slice(0, 6)
+        threadIdPresent: Boolean(sessionRow?.thread_id),
+        threadIdPrefix: sessionRow?.thread_id
+          ? String(sessionRow.thread_id).slice(0, 6)
           : null,
       }, 'match-poll session read');
 
       if (sessionRow) {
+        await ensureThreadForSession({
+          pool,
+          sessionRow,
+          logger: req.log,
+          context: {
+            requestId,
+            sessionId: sessionRow.id,
+          },
+        });
         const data = await buildMatchedResponse(pool, sessionRow, profileId, requestId);
         if (!data) {
           if (process.env.NODE_ENV !== 'production') {
@@ -579,9 +619,11 @@ export default async function matchRoutes(app) {
             status: 'waiting',
             matchRequestId: requestId,
             matchSessionId: sessionRow.id,
+            peerUserId: null,
+            otherUserId: null,
             peerLeancloudUserId: null,
-            conversationId: null,
-            reusedConversation: false,
+            threadId: null,
+            reusedThread: false,
             serverTime: new Date().toISOString(),
             reason: 'invalid_or_self_match',
             issuedJwt: auth.issuedJwt,
@@ -593,18 +635,18 @@ export default async function matchRoutes(app) {
             issuedJwt: auth.issuedJwt,
           });
         }
-        if (sessionRow.conversation_id) {
+        if (sessionRow.thread_id) {
           const response = {
             ...data,
             status: 'matched',
-            conversationId: sessionRow.conversation_id,
-            reusedConversation: true,
+            threadId: sessionRow.thread_id,
+            reusedThread: true,
             issuedJwt: auth.issuedJwt,
           };
           if (response.session) {
             response.session = {
               ...response.session,
-              conversation_id: sessionRow.conversation_id,
+              thread_id: sessionRow.thread_id,
               status: 'matched',
             };
           }
@@ -614,11 +656,13 @@ export default async function matchRoutes(app) {
           status: 'waiting',
           matchRequestId: requestId,
           matchSessionId: sessionRow.id,
+          peerUserId: data.peerUserId ?? data.peerLeancloudUserId ?? null,
+          otherUserId: data.otherUserId ?? data.peerUserId ?? data.peerLeancloudUserId ?? null,
           peerLeancloudUserId: data.peerLeancloudUserId ?? null,
-          conversationId: null,
-          reusedConversation: false,
+          threadId: null,
+          reusedThread: false,
           serverTime: new Date().toISOString(),
-          reason: 'conversation_pending',
+          reason: 'thread_pending',
           issuedJwt: auth.issuedJwt,
         });
       }
@@ -626,9 +670,11 @@ export default async function matchRoutes(app) {
         status: 'waiting',
         matchRequestId: requestId,
         matchSessionId: null,
+        peerUserId: null,
+        otherUserId: null,
         peerLeancloudUserId: null,
-        conversationId: null,
-        reusedConversation: false,
+        threadId: null,
+        reusedThread: false,
         reason: 'no_session_yet',
         serverTime: new Date().toISOString(),
         issuedJwt: auth.issuedJwt,
@@ -685,7 +731,18 @@ export default async function matchRoutes(app) {
       }
 
       const sessionRow = await getSessionByRequest(pool, requestId);
-      if (sessionRow && sessionRow.conversation_id) {
+      if (sessionRow) {
+        await ensureThreadForSession({
+          pool,
+          sessionRow,
+          logger: req.log,
+          context: {
+            requestId,
+            sessionId: sessionRow.id,
+          },
+        });
+      }
+      if (sessionRow && sessionRow.thread_id) {
         const data = await buildMatchedResponse(pool, sessionRow, profileId, requestId);
         if (data?.status === 'profile_incomplete') {
           return ok(reply, {
@@ -697,14 +754,14 @@ export default async function matchRoutes(app) {
           const response = {
             ...data,
             status: 'matched',
-            conversationId: sessionRow.conversation_id,
-            reusedConversation: true,
+            threadId: sessionRow.thread_id,
+            reusedThread: true,
             issuedJwt: auth.issuedJwt,
           };
           if (response.session) {
             response.session = {
               ...response.session,
-              conversation_id: sessionRow.conversation_id,
+              thread_id: sessionRow.thread_id,
               status: 'matched',
             };
           }
@@ -717,8 +774,8 @@ export default async function matchRoutes(app) {
         matchRequestId: requestId,
         matchSessionId: sessionRow?.id ?? null,
         peerLeancloudUserId: null,
-        conversationId: null,
-        reusedConversation: false,
+        threadId: null,
+        reusedThread: false,
         serverTime: new Date().toISOString(),
         issuedJwt: auth.issuedJwt,
       });
@@ -777,20 +834,23 @@ export default async function matchRoutes(app) {
       if (respondAuthError(err, reply)) return;
       throw err;
     }
-    const { sessionId, conversationId, force = false } = req.body || {};
-    if (!sessionId || !conversationId) {
-      return error(reply, 'INVALID_REQUEST', 'sessionId and conversationId required', 400);
+    const { sessionId, threadId, force = false } = req.body || {};
+    if (!sessionId || !threadId) {
+      return error(reply, 'INVALID_REQUEST', 'sessionId and threadId required', 400);
     }
     try {
       const { rows } = await pool.query(
-        'select attach_conversation_to_session($1,$2,$3) as session',
-        [sessionId, conversationId, force]
+        `update match_sessions
+         set thread_id = case when $3 then $2 else coalesce(thread_id, $2) end
+         where id = $1
+         returning *`,
+        [sessionId, threadId, force]
       );
-      return ok(reply, { ...(rows[0]?.session || {}), issuedJwt: auth.issuedJwt });
+      return ok(reply, { ...(rows[0] || {}), issuedJwt: auth.issuedJwt });
     } catch (err) {
       req.log.error(err);
       const status = err.statusCode || 500;
-      return error(reply, 'SERVER_ERROR', err.message || 'Failed to attach conversation', status);
+      return error(reply, 'SERVER_ERROR', err.message || 'Failed to attach thread', status);
     }
   });
 
@@ -805,8 +865,8 @@ export default async function matchRoutes(app) {
     const { sessionId, selfProfileId = null } = req.body || {};
     if (!sessionId) return error(reply, 'INVALID_REQUEST', 'sessionId required', 400);
     try {
-      const { rows } = await pool.query(
-        'select id, profile_a_id, profile_b_id, request_a_id, request_b_id, conversation_id from match_sessions where id = $1 limit 1',
+    const { rows } = await pool.query(
+        'select id, profile_a_id, profile_b_id, request_a_id, request_b_id, thread_id from match_sessions where id = $1 limit 1',
         [sessionId]
       );
       const sessionRow = rows[0];
@@ -823,8 +883,9 @@ export default async function matchRoutes(app) {
         sessionId: sessionRow.id,
         requestId: sessionRow.request_a_id || sessionRow.request_b_id || null,
         otherProfileId: otherProfile?.id ?? null,
-        otherLeancloudUserId: otherProfile?.leancloud_user_id ?? null,
-        conversationId: sessionRow.conversation_id ?? null,
+        otherUserId: otherProfile?.id ?? null,
+        otherLeancloudUserId: otherProfile?.id ?? null,
+        threadId: sessionRow.thread_id ?? null,
         issuedJwt: auth.issuedJwt,
       });
     } catch (err) {

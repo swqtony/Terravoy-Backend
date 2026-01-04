@@ -153,7 +153,7 @@ export default async function authSmsRoutes(app) {
         `insert into auth_users (phone)
          values ($1)
          on conflict (phone) do update set phone = excluded.phone
-         returning id, phone`,
+         returning id, phone, kyc_verified`,
         [normalized]
       );
       const user = userRows[0];
@@ -171,7 +171,7 @@ export default async function authSmsRoutes(app) {
         accessTokenExpiresIn: config.auth.accessTtlSeconds,
         refreshToken,
         refreshTokenExpiresIn: config.auth.refreshTtlSeconds,
-        user: { id: user.id, phone: user.phone },
+        user: { id: user.id, phone: user.phone, kycVerified: user.kyc_verified === true },
       });
     } catch (err) {
       req.log.error(err);
@@ -187,7 +187,7 @@ export default async function authSmsRoutes(app) {
     try {
       const refreshHash = hashToken(refreshToken);
       const { rows } = await pool.query(
-        `select s.id, s.user_id, s.refresh_expires_at, s.revoked_at, s.device_id, u.phone
+        `select s.id, s.user_id, s.refresh_expires_at, s.revoked_at, s.device_id, u.phone, u.kyc_verified
          from auth_sessions s
          join auth_users u on u.id = s.user_id
          where s.refresh_token_hash = $1
@@ -218,7 +218,7 @@ export default async function authSmsRoutes(app) {
         accessTokenExpiresIn: config.auth.accessTtlSeconds,
         refreshToken: nextRefreshToken,
         refreshTokenExpiresIn: config.auth.refreshTtlSeconds,
-        user: { id: session.user_id, phone: session.phone },
+        user: { id: session.user_id, phone: session.phone, kycVerified: session.kyc_verified === true },
       });
     } catch (err) {
       req.log.error(err);

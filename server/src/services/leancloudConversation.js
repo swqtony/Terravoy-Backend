@@ -1,3 +1,4 @@
+// DEPRECATED: LeanCloud integration is removed from runtime paths. Kept only for reference.
 import fetch from 'node-fetch';
 import { config } from '../config.js';
 
@@ -28,6 +29,7 @@ function leanHeaders({ useMaster }) {
 }
 
 function ensureLeanConfig() {
+  throw new Error('DEPRECATED: LeanCloud integration is disabled');
   const missing = [];
   if (!config.lean.server) missing.push('LEAN_SERVER');
   if (!config.lean.appId) missing.push('LEAN_APP_ID');

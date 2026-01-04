@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,615 +20,453 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"terravoy/im/im-gateway/internal/redisx"
 )
 
 type Config struct {
-	WsAddr             string
-	ApiBaseURL         string
-	RedisURL           string
-	AuthJWTSecret      string
-	PresenceTTLSeconds int
-	PresenceRefreshSec int
-	RateUserMax        int
-	RateUserWindowMs   int
-	RateThreadMax      int
+	Addr              string
+	APIBaseURL        string
+	RedisURL          string
+	AuthJWTSecret     string
+	PresenceTTL       time.Duration
+	PresenceRefresh   time.Duration
+	GatewayID         string
+	RateUserMax       int
+	RateUserWindowMs  int
+	RateThreadMax     int
 	RateThreadWindowMs int
 }
 
-type IncomingMessage struct {
+type ctxKey string
+
+const (
+	ctxTraceID ctxKey = "trace_id"
+)
+
+var (
+	upgrader = websocket.Upgrader{
+		CheckOrigin: func(_ *http.Request) bool { return true },
+	}
+	wsConnections = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "ws_connections",
+		Help: "Active websocket connections",
+	})
+	wsInbound = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "msg_in_total",
+		Help: "Inbound websocket messages",
+	})
+	wsOutbound = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "msg_out_total",
+		Help: "Outbound websocket messages",
+	})
+	wsErrors = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "errors_total",
+		Help: "Websocket handler errors",
+	})
+)
+
+type inboundMsg struct {
 	Type        string          `json:"type"`
-	Token       string          `json:"token,omitempty"`
-	ThreadID    string          `json:"thread_id,omitempty"`
-	ClientMsgID string          `json:"client_msg_id,omitempty"`
-	MsgType     string          `json:"msg_type,omitempty"`
-	Content     json.RawMessage `json:"content,omitempty"`
-	LastReadSeq int64           `json:"last_read_seq,omitempty"`
-	TraceID     string          `json:"trace_id,omitempty"`
+	Token       string          `json:"token"`
+	ThreadID    string          `json:"thread_id"`
+	MsgType     string          `json:"msg_type"`
+	Content     json.RawMessage `json:"content"`
+	ClientMsgID string          `json:"client_msg_id"`
+	LastReadSeq int64           `json:"last_read_seq"`
+	TraceID     string          `json:"trace_id"`
 }
 
-type OutgoingMessage struct {
-	Type        string          `json:"type"`
-	ThreadID    string          `json:"thread_id,omitempty"`
-	MsgID       string          `json:"msg_id,omitempty"`
-	ClientMsgID string          `json:"client_msg_id,omitempty"`
-	Seq         int64           `json:"seq,omitempty"`
-	SenderID    string          `json:"sender_id,omitempty"`
-	MsgType     string          `json:"msg_type,omitempty"`
-	Content     json.RawMessage `json:"content,omitempty"`
-	CreatedAt   string          `json:"created_at,omitempty"`
-	TraceID     string          `json:"trace_id,omitempty"`
-	Code        string          `json:"code,omitempty"`
-	Message     string          `json:"message,omitempty"`
-	UserID      string          `json:"user_id,omitempty"`
+type outboundMsg struct {
+	Type     string      `json:"type"`
+	TraceID  string      `json:"trace_id,omitempty"`
+	Payload  interface{} `json:"payload,omitempty"`
+	Code     string      `json:"code,omitempty"`
+	Message  string      `json:"message,omitempty"`
 }
 
 type Conn struct {
-	id         string
-	ws         *websocket.Conn
-	send       chan []byte
-	userID     string
-	token      string
-	subs       map[string]struct{}
-	closeOnce  sync.Once
-	closeCh    chan struct{}
-	connected  time.Time
-	traceIDGen func() string
+	ws        *websocket.Conn
+	userID    string
+	token     string
+	headerToken string
+	traceID   string
+	send      chan []byte
+	subs      map[string]bool
 }
 
 type Hub struct {
-	mu            sync.RWMutex
-	conns         map[string]*Conn
-	connsByUser   map[string]map[string]*Conn
-	subsByThread  map[string]map[string]*Conn
+	mu          sync.RWMutex
+	conns       map[*Conn]bool
+	userConns   map[string]map[*Conn]bool
+	threadSubs  map[string]map[*Conn]bool
 }
 
-func NewHub() *Hub {
+func newHub() *Hub {
 	return &Hub{
-		conns:        make(map[string]*Conn),
-		connsByUser:  make(map[string]map[string]*Conn),
-		subsByThread: make(map[string]map[string]*Conn),
+		conns:      map[*Conn]bool{},
+		userConns:  map[string]map[*Conn]bool{},
+		threadSubs: map[string]map[*Conn]bool{},
 	}
 }
 
 func (h *Hub) addConn(c *Conn) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.conns[c.id] = c
+	h.conns[c] = true
 }
 
 func (h *Hub) removeConn(c *Conn) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	delete(h.conns, c.id)
+	delete(h.conns, c)
 	if c.userID != "" {
-		if userMap, ok := h.connsByUser[c.userID]; ok {
-			delete(userMap, c.id)
-			if len(userMap) == 0 {
-				delete(h.connsByUser, c.userID)
+		if set, ok := h.userConns[c.userID]; ok {
+			delete(set, c)
+			if len(set) == 0 {
+				delete(h.userConns, c.userID)
 			}
 		}
 	}
 	for threadID := range c.subs {
-		if subs, ok := h.subsByThread[threadID]; ok {
-			delete(subs, c.id)
-			if len(subs) == 0 {
-				delete(h.subsByThread, threadID)
+		if set, ok := h.threadSubs[threadID]; ok {
+			delete(set, c)
+			if len(set) == 0 {
+				delete(h.threadSubs, threadID)
 			}
 		}
 	}
 }
 
-func (h *Hub) bindUser(c *Conn, userID string) {
+func (h *Hub) attachUser(c *Conn, userID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	c.userID = userID
-	if h.connsByUser[userID] == nil {
-		h.connsByUser[userID] = make(map[string]*Conn)
+	if _, ok := h.userConns[userID]; !ok {
+		h.userConns[userID] = map[*Conn]bool{}
 	}
-	h.connsByUser[userID][c.id] = c
+	h.userConns[userID][c] = true
 }
 
 func (h *Hub) subscribe(c *Conn, threadID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	c.subs[threadID] = struct{}{}
-	if h.subsByThread[threadID] == nil {
-		h.subsByThread[threadID] = make(map[string]*Conn)
+	if c.subs == nil {
+		c.subs = map[string]bool{}
 	}
-	h.subsByThread[threadID][c.id] = c
+	c.subs[threadID] = true
+	if _, ok := h.threadSubs[threadID]; !ok {
+		h.threadSubs[threadID] = map[*Conn]bool{}
+	}
+	h.threadSubs[threadID][c] = true
 }
 
-func (h *Hub) fanout(threadID string, msg []byte) {
+func (h *Hub) broadcast(threadID string, payload []byte) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	for _, c := range h.subsByThread[threadID] {
+	for c := range h.threadSubs[threadID] {
 		select {
-		case c.send <- msg:
+		case c.send <- payload:
 		default:
-			c.close()
 		}
 	}
 }
-
-var (
-	upgrader = websocket.Upgrader{
-		CheckOrigin: func(_ *http.Request) bool { return true },
-	}
-	luaSlidingWindow = `
-local key = KEYS[1]
-local window_ms = tonumber(ARGV[1])
-local max_hits = tonumber(ARGV[2])
-local now = redis.call('TIME')
-local now_ms = (now[1] * 1000) + math.floor(now[2] / 1000)
-local window_start = now_ms - window_ms
-redis.call('ZREMRANGEBYSCORE', key, 0, window_start)
-local count = redis.call('ZCARD', key)
-if count >= max_hits then
-  local earliest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
-  local oldest = tonumber(earliest[2]) or now_ms
-  local retry_after_ms = oldest + window_ms - now_ms
-  if retry_after_ms < 0 then retry_after_ms = 0 end
-  return {0, retry_after_ms}
-end
-redis.call('ZADD', key, now_ms, tostring(now_ms))
-redis.call('PEXPIRE', key, window_ms + 1000)
-return {1, 0}
-`
-)
-
-var (
-	metricConnections = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "im_gateway_connections",
-		Help: "Active websocket connections",
-	})
-	metricMsgSendTotal = prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "im_gateway_msg_send_total",
-		Help: "Total messages sent via gateway",
-	})
-	metricMsgSendErrors = prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "im_gateway_msg_send_errors_total",
-		Help: "Total message send errors",
-	})
-	metricWriteLatency = prometheus.NewHistogram(prometheus.HistogramOpts{
-		Name:    "im_gateway_write_db_latency_ms",
-		Help:    "Latency for message write API",
-		Buckets: []float64{5, 10, 25, 50, 100, 250, 500, 1000},
-	})
-)
 
 func main() {
 	cfg := loadConfig()
 	setupLogger()
-	prometheus.MustRegister(metricConnections, metricMsgSendTotal, metricMsgSendErrors, metricWriteLatency)
+
+	prometheus.MustRegister(wsConnections, wsInbound, wsOutbound, wsErrors)
 
 	redisClient := newRedisClient(cfg.RedisURL)
-	hub := NewHub()
-	httpClient := &http.Client{Timeout: 10 * time.Second}
+	hub := newHub()
+	httpClient := &http.Client{Timeout: 8 * time.Second}
 
-	http.Handle("/metrics", promhttp.Handler())
-	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		c := &Conn{
-			id:         randomID("conn"),
-			ws:         conn,
-			send:       make(chan []byte, 128),
-			subs:       make(map[string]struct{}),
-			closeCh:    make(chan struct{}),
-			connected:  time.Now(),
-			traceIDGen: func() string { return randomID("trace") },
-		}
-		hub.addConn(c)
-		metricConnections.Inc()
-		log.Info().Str("connId", c.id).Msg("ws connected")
-		go c.writePump()
-		go c.readPump(cfg, hub, redisClient, httpClient)
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		handleWS(w, r, cfg, hub, redisClient, httpClient)
 	})
 
 	server := &http.Server{
-		Addr:              cfg.WsAddr,
-		ReadHeaderTimeout: 5 * time.Second,
+		Addr:    cfg.Addr,
+		Handler: traceMiddleware(mux),
 	}
-	log.Info().Str("addr", cfg.WsAddr).Msg("im-gateway listening")
+	log.Info().Str("addr", cfg.Addr).Msg("im-gateway listening")
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatal().Err(err).Msg("server failed")
+		log.Fatal().Err(err).Msg("gateway crashed")
+	}
+}
+
+func loadConfig() Config {
+	return Config{
+		Addr:            env("IM_WS_ADDR", ":8081"),
+		APIBaseURL:      strings.TrimRight(env("IM_API_BASE_URL", "http://localhost:8090"), "/"),
+		RedisURL:        env("REDIS_URL", "redis://localhost:6379/0"),
+		AuthJWTSecret:   env("AUTH_JWT_SECRET", ""),
+		PresenceTTL:     75 * time.Second,
+		PresenceRefresh: 30 * time.Second,
+		GatewayID:       env("IM_GATEWAY_ID", randomID("gw")),
+		RateUserMax:       envInt("IM_RATE_USER_MAX", 20),
+		RateUserWindowMs:  envInt("IM_RATE_USER_WINDOW_MS", 10000),
+		RateThreadMax:     envInt("IM_RATE_THREAD_MAX", 30),
+		RateThreadWindowMs: envInt("IM_RATE_THREAD_WINDOW_MS", 10000),
 	}
 }
 
 func setupLogger() {
 	zerolog.TimeFieldFormat = time.RFC3339
-	if strings.ToLower(os.Getenv("NODE_ENV")) == "production" {
-		return
+}
+
+func env(key, fallback string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
 	}
-	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: time.RFC3339})
+	return fallback
 }
 
-func loadConfig() Config {
-	return Config{
-		WsAddr:             getEnv("IM_WS_ADDR", ":8081"),
-		ApiBaseURL:         getEnv("IM_API_BASE_URL", "http://localhost:3000"),
-		RedisURL:           getEnv("REDIS_URL", "redis://localhost:6379/0"),
-		AuthJWTSecret:      getEnv("AUTH_JWT_SECRET", ""),
-		PresenceTTLSeconds: getEnvInt("IM_PRESENCE_TTL_SECONDS", 75),
-		PresenceRefreshSec: getEnvInt("IM_PRESENCE_REFRESH_SECONDS", 30),
-		RateUserMax:        getEnvInt("IM_RATE_USER_MAX", 20),
-		RateUserWindowMs:   getEnvInt("IM_RATE_USER_WINDOW_MS", 10000),
-		RateThreadMax:      getEnvInt("IM_RATE_THREAD_MAX", 30),
-		RateThreadWindowMs: getEnvInt("IM_RATE_THREAD_WINDOW_MS", 10000),
-	}
-}
-
-func newRedisClient(url string) *redis.Client {
-	opt, err := redis.ParseURL(url)
-	if err != nil {
-		log.Warn().Err(err).Msg("redis url invalid")
-		return redis.NewClient(&redis.Options{Addr: "localhost:6379"})
-	}
-	return redis.NewClient(opt)
-}
-
-func (c *Conn) close() {
-	c.closeOnce.Do(func() {
-		close(c.closeCh)
-		_ = c.ws.Close()
-		metricConnections.Dec()
-	})
-}
-
-func (c *Conn) writePump() {
-	pingTicker := time.NewTicker(30 * time.Second)
-	defer func() {
-		pingTicker.Stop()
-		c.close()
-	}()
-	for {
-		select {
-		case msg, ok := <-c.send:
-			if !ok {
-				return
-			}
-			_ = c.ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			if err := c.ws.WriteMessage(websocket.TextMessage, msg); err != nil {
-				return
-			}
-		case <-pingTicker.C:
-			_ = c.ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			if err := c.ws.WriteMessage(websocket.PingMessage, nil); err != nil {
-				return
-			}
-		case <-c.closeCh:
-			return
+func envInt(key string, fallback int) int {
+	if val := os.Getenv(key); val != "" {
+		parsed, err := strconv.Atoi(val)
+		if err == nil {
+			return parsed
 		}
 	}
+	return fallback
+}
+func traceMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		trace := r.Header.Get("X-Trace-Id")
+		if trace == "" {
+			trace = randomID("trace")
+		}
+		w.Header().Set("X-Trace-Id", trace)
+		ctx := context.WithValue(r.Context(), ctxTraceID, trace)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
-func (c *Conn) readPump(cfg Config, hub *Hub, redisClient *redis.Client, httpClient *http.Client) {
-	defer func() {
-		hub.removeConn(c)
-		c.close()
-	}()
-	c.ws.SetReadLimit(1 << 20)
-	_ = c.ws.SetReadDeadline(time.Now().Add(60 * time.Second))
-	c.ws.SetPongHandler(func(string) error {
-		_ = c.ws.SetReadDeadline(time.Now().Add(60 * time.Second))
-		return nil
-	})
+func handleWS(w http.ResponseWriter, r *http.Request, cfg Config, hub *Hub, rdb *redis.Client, httpClient *http.Client) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		wsErrors.Inc()
+		return
+	}
+	trace := ctxValue(r.Context(), ctxTraceID)
+	c := &Conn{
+		ws:      conn,
+		traceID: trace,
+		headerToken: extractBearer(r.Header.Get("Authorization")),
+		send:    make(chan []byte, 16),
+		subs:    map[string]bool{},
+	}
+	hub.addConn(c)
+	wsConnections.Inc()
+	log.Info().Str("trace_id", trace).Msg("ws connected")
+	go writeLoop(c)
+	readLoop(c, cfg, hub, rdb, httpClient)
+	hub.removeConn(c)
+	wsConnections.Dec()
+	if c.userID != "" {
+		clearPresence(context.Background(), rdb, c.userID)
+	}
+	_ = conn.Close()
+	log.Info().Str("trace_id", trace).Msg("ws closed")
+}
 
+func readLoop(c *Conn, cfg Config, hub *Hub, rdb *redis.Client, httpClient *http.Client) {
+	stop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(cfg.PresenceRefresh)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if c.userID != "" {
+					refreshPresence(context.Background(), rdb, c.userID, cfg.GatewayID, cfg.PresenceTTL)
+				}
+			case <-stop:
+				return
+			}
+		}
+	}()
+	defer close(stop)
 	for {
 		_, data, err := c.ws.ReadMessage()
 		if err != nil {
 			return
 		}
-		var msg IncomingMessage
+		wsInbound.Inc()
+		var msg inboundMsg
 		if err := json.Unmarshal(data, &msg); err != nil {
-			c.sendError("", "INVALID_JSON", "invalid message")
+			sendError(c, "INVALID_JSON", "invalid json")
 			continue
+		}
+		if msg.TraceID != "" {
+			c.traceID = msg.TraceID
 		}
 		switch msg.Type {
 		case "auth":
-			c.handleAuth(cfg, hub, redisClient, msg)
-		case "sub":
-			c.handleSub(cfg, hub, httpClient, msg)
-		case "msg":
-			c.handleMsg(cfg, hub, redisClient, httpClient, msg)
-		case "read":
-			c.handleRead(cfg, httpClient, msg)
-		default:
-			c.sendError(msg.TraceID, "UNKNOWN_TYPE", "unknown type")
-		}
-	}
-}
-
-func (c *Conn) handleAuth(cfg Config, hub *Hub, redisClient *redis.Client, msg IncomingMessage) {
-	if msg.Token == "" {
-		c.sendError(msg.TraceID, "AUTH_REQUIRED", "token required")
-		return
-	}
-	userID, err := verifyJWT(msg.Token, cfg.AuthJWTSecret)
-	if err != nil {
-		c.sendError(msg.TraceID, "AUTH_INVALID", "invalid token")
-		return
-	}
-	c.token = msg.Token
-	hub.bindUser(c, userID)
-	c.startPresence(redisClient, cfg, userID)
-	c.sendJSON(OutgoingMessage{Type: "auth_ok", UserID: userID, TraceID: msg.TraceID})
-	log.Info().Str("connId", c.id).Str("userId", userID).Msg("auth ok")
-}
-
-func (c *Conn) handleSub(cfg Config, hub *Hub, httpClient *http.Client, msg IncomingMessage) {
-	if c.userID == "" {
-		c.sendError(msg.TraceID, "AUTH_REQUIRED", "auth required")
-		return
-	}
-	if msg.ThreadID == "" {
-		c.sendError(msg.TraceID, "INVALID_REQUEST", "thread_id required")
-		return
-	}
-	ok, err := apiCheckPermission(httpClient, cfg.ApiBaseURL, c.token, msg.ThreadID)
-	if err != nil || !ok {
-		c.sendError(msg.TraceID, "FORBIDDEN", "not allowed")
-		return
-	}
-	hub.subscribe(c, msg.ThreadID)
-	c.sendJSON(OutgoingMessage{Type: "sub_ok", ThreadID: msg.ThreadID, TraceID: msg.TraceID})
-}
-
-func (c *Conn) handleMsg(cfg Config, hub *Hub, redisClient *redis.Client, httpClient *http.Client, msg IncomingMessage) {
-	if c.userID == "" {
-		c.sendError(msg.TraceID, "AUTH_REQUIRED", "auth required")
-		return
-	}
-	if msg.ThreadID == "" || msg.ClientMsgID == "" || msg.MsgType == "" {
-		c.sendError(msg.TraceID, "INVALID_REQUEST", "thread_id/client_msg_id/msg_type required")
-		return
-	}
-	if _, ok := c.subs[msg.ThreadID]; !ok {
-		c.sendError(msg.TraceID, "NOT_SUBSCRIBED", "subscribe first")
-		return
-	}
-	if allowed, retry := checkRate(redisClient, fmt.Sprintf("im:rate:user:%s", c.userID), cfg.RateUserWindowMs, cfg.RateUserMax); !allowed {
-		c.sendError(msg.TraceID, "RATE_LIMITED", fmt.Sprintf("retry_after_ms:%d", retry))
-		return
-	}
-	if allowed, retry := checkRate(redisClient, fmt.Sprintf("im:rate:thread:%s", msg.ThreadID), cfg.RateThreadWindowMs, cfg.RateThreadMax); !allowed {
-		c.sendError(msg.TraceID, "RATE_LIMITED", fmt.Sprintf("retry_after_ms:%d", retry))
-		return
-	}
-
-	start := time.Now()
-	resp, err := apiPostMessage(httpClient, cfg.ApiBaseURL, c.token, msg.ThreadID, msg.ClientMsgID, msg.MsgType, msg.Content)
-	metricWriteLatency.Observe(float64(time.Since(start).Milliseconds()))
-	if err != nil {
-		metricMsgSendErrors.Inc()
-		c.sendError(msg.TraceID, "SEND_FAILED", "write failed")
-		return
-	}
-	metricMsgSendTotal.Inc()
-	ack := OutgoingMessage{
-		Type:        "ack",
-		ClientMsgID: msg.ClientMsgID,
-		MsgID:       resp.MsgID,
-		Seq:         resp.Seq,
-		TraceID:     msg.TraceID,
-	}
-	c.sendJSON(ack)
-
-	broadcast := OutgoingMessage{
-		Type:      "msg",
-		ThreadID:  msg.ThreadID,
-		MsgID:     resp.MsgID,
-		Seq:       resp.Seq,
-		SenderID:  c.userID,
-		MsgType:   msg.MsgType,
-		Content:   msg.Content,
-		CreatedAt: resp.CreatedAt,
-		TraceID:   msg.TraceID,
-	}
-	if payload, err := json.Marshal(broadcast); err == nil {
-		hub.fanout(msg.ThreadID, payload)
-	}
-	if redisClient != nil {
-		go enqueuePushIfOffline(redisClient, httpClient, cfg.ApiBaseURL, c.token, msg.ThreadID, c.userID, resp.MsgID, resp.Seq)
-	}
-}
-
-func (c *Conn) handleRead(cfg Config, httpClient *http.Client, msg IncomingMessage) {
-	if c.userID == "" {
-		c.sendError(msg.TraceID, "AUTH_REQUIRED", "auth required")
-		return
-	}
-	if msg.ThreadID == "" {
-		c.sendError(msg.TraceID, "INVALID_REQUEST", "thread_id required")
-		return
-	}
-	if msg.LastReadSeq < 0 {
-		c.sendError(msg.TraceID, "INVALID_REQUEST", "last_read_seq required")
-		return
-	}
-	if err := apiPostRead(httpClient, cfg.ApiBaseURL, c.token, msg.ThreadID, msg.LastReadSeq); err != nil {
-		c.sendError(msg.TraceID, "READ_FAILED", "read failed")
-		return
-	}
-	c.sendJSON(OutgoingMessage{Type: "read_ok", ThreadID: msg.ThreadID, TraceID: msg.TraceID})
-}
-
-func (c *Conn) startPresence(redisClient *redis.Client, cfg Config, userID string) {
-	if redisClient == nil {
-		return
-	}
-	key := fmt.Sprintf("im:online:%s", userID)
-	ctx := context.Background()
-	_ = redisClient.Set(ctx, key, c.id, time.Duration(cfg.PresenceTTLSeconds)*time.Second).Err()
-	ticker := time.NewTicker(time.Duration(cfg.PresenceRefreshSec) * time.Second)
-	go func() {
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				_ = redisClient.Set(ctx, key, c.id, time.Duration(cfg.PresenceTTLSeconds)*time.Second).Err()
-			case <-c.closeCh:
-				return
+			if c.userID != "" {
+				sendError(c, "ALREADY_AUTH", "already authenticated")
+				continue
 			}
+			token := extractBearer(msg.Token)
+			if token == "" {
+				token = c.headerToken
+			}
+			userID, err := verifyToken(token, cfg.AuthJWTSecret)
+			if err != nil {
+				sendError(c, "UNAUTHORIZED", "invalid token")
+				continue
+			}
+			c.token = token
+			hub.attachUser(c, userID)
+			refreshPresence(context.Background(), rdb, userID, cfg.GatewayID, cfg.PresenceTTL)
+			sendAuthOK(c, map[string]string{"user_id": userID})
+		case "sub":
+			if c.userID == "" {
+				sendError(c, "UNAUTHORIZED", "auth required")
+				continue
+			}
+			if msg.ThreadID == "" {
+				sendError(c, "INVALID_REQUEST", "thread_id required")
+				continue
+			}
+			if !checkPermission(httpClient, cfg.APIBaseURL, c.token, msg.ThreadID) {
+				sendError(c, "FORBIDDEN", "not a member")
+				continue
+			}
+			hub.subscribe(c, msg.ThreadID)
+			sendAck(c, map[string]any{"action": "sub", "thread_id": msg.ThreadID})
+		case "msg":
+			if c.userID == "" {
+				sendError(c, "UNAUTHORIZED", "auth required")
+				continue
+			}
+			if msg.ThreadID == "" || msg.MsgType == "" {
+				sendError(c, "INVALID_REQUEST", "thread_id/msg_type required")
+				continue
+			}
+			if allowed, _, err := redisx.AllowRate(context.Background(), rdb, redisx.KeyRateUser(c.userID), cfg.RateUserWindowMs, cfg.RateUserMax); err == nil && !allowed {
+				sendError(c, "RATE_LIMITED", "user rate limited")
+				continue
+			}
+			if allowed, _, err := redisx.AllowRate(context.Background(), rdb, redisx.KeyRateThread(msg.ThreadID), cfg.RateThreadWindowMs, cfg.RateThreadMax); err == nil && !allowed {
+				sendError(c, "RATE_LIMITED", "thread rate limited")
+				continue
+			}
+			resp, err := createMessage(httpClient, cfg.APIBaseURL, c.token, msg.ThreadID, msg.ClientMsgID, msg.MsgType, msg.Content)
+			if err != nil {
+				sendError(c, "SEND_FAILED", err.Error())
+				continue
+			}
+			sendAck(c, map[string]any{
+				"action":        "msg",
+				"thread_id":     msg.ThreadID,
+				"client_msg_id": msg.ClientMsgID,
+				"msg_id":        resp.MsgID,
+				"seq":           resp.Seq,
+			})
+			out := map[string]any{
+				"thread_id":  msg.ThreadID,
+				"msg_id":     resp.MsgID,
+				"seq":        resp.Seq,
+				"created_at": resp.CreatedAt,
+				"sender_id":  c.userID,
+				"msg_type":   msg.MsgType,
+				"content":    json.RawMessage(msg.Content),
+			}
+			broadcast(hub, msg.ThreadID, c.traceID, out)
+		case "read":
+			if c.userID == "" {
+				sendError(c, "UNAUTHORIZED", "auth required")
+				continue
+			}
+			if msg.ThreadID == "" || msg.LastReadSeq <= 0 {
+				sendError(c, "INVALID_REQUEST", "thread_id/last_read_seq required")
+				continue
+			}
+			if err := updateRead(httpClient, cfg.APIBaseURL, c.token, msg.ThreadID, msg.LastReadSeq); err != nil {
+				sendError(c, "READ_FAILED", err.Error())
+				continue
+			}
+			sendAck(c, map[string]any{"action": "read", "thread_id": msg.ThreadID, "last_read_seq": msg.LastReadSeq})
+		case "ping":
+			if c.userID != "" {
+				refreshPresence(context.Background(), rdb, c.userID, cfg.GatewayID, cfg.PresenceTTL)
+			}
+			sendAck(c, map[string]string{"action": "ping"})
+		default:
+			sendError(c, "UNKNOWN_TYPE", "unsupported type")
 		}
-	}()
+	}
 }
 
-func (c *Conn) sendJSON(msg OutgoingMessage) {
-	data, err := json.Marshal(msg)
-	if err != nil {
-		return
+func writeLoop(c *Conn) {
+	for payload := range c.send {
+		_ = c.ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		if err := c.ws.WriteMessage(websocket.TextMessage, payload); err != nil {
+			return
+		}
+		wsOutbound.Inc()
 	}
+}
+
+func sendAuthOK(c *Conn, payload interface{}) {
+	msg := outboundMsg{Type: "auth_ok", TraceID: c.traceID, Payload: payload}
+	sendJSON(c, msg)
+}
+
+func sendAck(c *Conn, payload interface{}) {
+	msg := outboundMsg{Type: "ack", TraceID: c.traceID, Payload: payload}
+	sendJSON(c, msg)
+}
+
+func sendError(c *Conn, code, message string) {
+	wsErrors.Inc()
+	msg := outboundMsg{Type: "error", TraceID: c.traceID, Code: code, Message: message}
+	sendJSON(c, msg)
+}
+
+func sendJSON(c *Conn, msg outboundMsg) {
+	data, _ := json.Marshal(msg)
 	select {
 	case c.send <- data:
 	default:
-		c.close()
+		wsErrors.Inc()
+		_ = c.ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "slow consumer"), time.Now().Add(2*time.Second))
+		_ = c.ws.Close()
 	}
 }
 
-func (c *Conn) sendError(traceID, code, message string) {
-	if traceID == "" && c.traceIDGen != nil {
-		traceID = c.traceIDGen()
+func broadcast(hub *Hub, threadID, trace string, payload map[string]any) {
+	msg := outboundMsg{
+		Type:    "msg",
+		TraceID: trace,
+		Payload: payload,
 	}
-	c.sendJSON(OutgoingMessage{Type: "error", Code: code, Message: message, TraceID: traceID})
+	data, _ := json.Marshal(msg)
+	hub.broadcast(threadID, data)
 }
 
-func apiCheckPermission(client *http.Client, baseURL, token, threadID string) (bool, error) {
-	url := fmt.Sprintf("%s/v1/threads/%s/permission", strings.TrimRight(baseURL, "/"), threadID)
-	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := client.Do(req)
-	if err != nil {
-		return false, err
+func extractBearer(raw string) string {
+	if raw == "" {
+		return ""
 	}
-	defer resp.Body.Close()
-	return resp.StatusCode == 200, nil
+	parts := strings.SplitN(raw, " ", 2)
+	if len(parts) == 2 && strings.EqualFold(parts[0], "bearer") {
+		return strings.TrimSpace(parts[1])
+	}
+	return strings.TrimSpace(raw)
 }
 
-type messageResp struct {
-	Success bool `json:"success"`
-	Data    struct {
-		MsgID     string `json:"msg_id"`
-		Seq       int64  `json:"seq"`
-		CreatedAt string `json:"created_at"`
-	} `json:"data"`
-}
-
-func apiPostMessage(client *http.Client, baseURL, token, threadID, clientMsgID, msgType string, content json.RawMessage) (*messageResp, error) {
-	payload := map[string]interface{}{
-		"thread_id":    threadID,
-		"client_msg_id": clientMsgID,
-		"type":        msgType,
-		"content":     json.RawMessage(content),
+func verifyToken(token, secret string) (string, error) {
+	if token == "" || secret == "" {
+		return "", errors.New("missing token")
 	}
-	body, _ := json.Marshal(payload)
-	url := fmt.Sprintf("%s/v1/messages", strings.TrimRight(baseURL, "/"))
-	req, _ := http.NewRequest("POST", url, strings.NewReader(string(body)))
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("write status %d", resp.StatusCode)
-	}
-	var data messageResp
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, err
-	}
-	return &data, nil
-}
-
-func apiPostRead(client *http.Client, baseURL, token, threadID string, lastRead int64) error {
-	payload := map[string]interface{}{
-		"last_read_seq": lastRead,
-	}
-	body, _ := json.Marshal(payload)
-	url := fmt.Sprintf("%s/v1/threads/%s/read", strings.TrimRight(baseURL, "/"), threadID)
-	req, _ := http.NewRequest("POST", url, strings.NewReader(string(body)))
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("read status %d", resp.StatusCode)
-	}
-	return nil
-}
-
-func apiThreadMembers(client *http.Client, baseURL, token, threadID string) ([]string, error) {
-	url := fmt.Sprintf("%s/v1/threads/%s/members", strings.TrimRight(baseURL, "/"), threadID)
-	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("members status %d", resp.StatusCode)
-	}
-	var data struct {
-		Success bool `json:"success"`
-		Data    struct {
-			Members []struct {
-				UserID string `json:"user_id"`
-			} `json:"members"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, err
-	}
-	var out []string
-	for _, m := range data.Data.Members {
-		out = append(out, m.UserID)
-	}
-	return out, nil
-}
-
-func enqueuePushIfOffline(redisClient *redis.Client, httpClient *http.Client, baseURL, token, threadID, senderID, msgID string, seq int64) {
-	ctx := context.Background()
-	members, err := apiThreadMembers(httpClient, baseURL, token, threadID)
-	if err != nil {
-		return
-	}
-	for _, memberID := range members {
-		if memberID == senderID {
-			continue
-		}
-		presenceKey := fmt.Sprintf("im:online:%s", memberID)
-		online, _ := redisClient.Get(ctx, presenceKey).Result()
-		if online != "" {
-			continue
-		}
-		_, _ = redisClient.XAdd(ctx, &redis.XAddArgs{
-			Stream: "im:push:stream",
-			Values: map[string]any{
-				"msg_id":          msgID,
-				"thread_id":       threadID,
-				"seq":             fmt.Sprintf("%d", seq),
-				"to_user_id":      memberID,
-				"attempt":         "0",
-				"available_at_ms": fmt.Sprintf("%d", time.Now().UnixMilli()),
-			},
-		}).Result()
-	}
-}
-
-func verifyJWT(tokenString, secret string) (string, error) {
-	if secret == "" {
-		return "", errors.New("missing secret")
-	}
-	parsed, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		if token.Method.Alg() != jwt.SigningMethodHS256.Alg() {
-			return nil, fmt.Errorf("unexpected alg")
+	parsed, err := jwt.Parse(token, func(t *jwt.Token) (interface{}, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, errors.New("unexpected signing method")
 		}
 		return []byte(secret), nil
 	})
@@ -645,40 +484,121 @@ func verifyJWT(tokenString, secret string) (string, error) {
 	return sub, nil
 }
 
-func checkRate(client *redis.Client, key string, windowMs int, max int) (bool, int64) {
-	if client == nil {
-		return true, 0
+func newRedisClient(url string) *redis.Client {
+	if url == "" {
+		return nil
 	}
-	ctx := context.Background()
-	res, err := client.Eval(ctx, luaSlidingWindow, []string{key}, windowMs, max).Result()
+	opt, err := redis.ParseURL(url)
 	if err != nil {
-		return true, 0
+		return redis.NewClient(&redis.Options{Addr: url})
 	}
-	values, ok := res.([]interface{})
-	if !ok || len(values) < 2 {
-		return true, 0
+	return redis.NewClient(opt)
+}
+
+func refreshPresence(ctx context.Context, rdb *redis.Client, userID, gatewayID string, ttl time.Duration) {
+	if rdb == nil || userID == "" {
+		return
 	}
-	allowed := values[0].(int64) == 1
-	retryMs := values[1].(int64)
-	return allowed, retryMs
+	key := redisx.KeyPresence(userID)
+	_ = rdb.Set(ctx, key, gatewayID, ttl).Err()
+}
+
+func clearPresence(ctx context.Context, rdb *redis.Client, userID string) {
+	if rdb == nil || userID == "" {
+		return
+	}
+	key := redisx.KeyPresence(userID)
+	_ = rdb.Del(ctx, key).Err()
+}
+
+type apiResponse struct {
+	Success bool            `json:"success"`
+	Data    json.RawMessage `json:"data"`
+	Code    string          `json:"code"`
+	Message string          `json:"message"`
+}
+
+type createMsgResp struct {
+	MsgID     string `json:"msg_id"`
+	Seq       int64  `json:"seq"`
+	CreatedAt string `json:"created_at"`
+}
+
+func createMessage(client *http.Client, baseURL, token, threadID, clientMsgID, msgType string, content json.RawMessage) (*createMsgResp, error) {
+	if clientMsgID == "" {
+		clientMsgID = randomID("client")
+	}
+	body := map[string]any{
+		"thread_id":     threadID,
+		"client_msg_id": clientMsgID,
+		"type":          msgType,
+		"content":       json.RawMessage(content),
+	}
+	raw, err := doAPI(client, baseURL, token, http.MethodPost, "/v1/messages", body)
+	if err != nil {
+		return nil, err
+	}
+	var resp createMsgResp
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, errors.New("invalid im-api response")
+	}
+	return &resp, nil
+}
+
+func updateRead(client *http.Client, baseURL, token, threadID string, seq int64) error {
+	body := map[string]any{"last_read_seq": seq}
+	_, err := doAPI(client, baseURL, token, http.MethodPost, fmt.Sprintf("/v1/threads/%s/read", threadID), body)
+	return err
+}
+
+func checkPermission(client *http.Client, baseURL, token, threadID string) bool {
+	_, err := doAPI(client, baseURL, token, http.MethodGet, fmt.Sprintf("/v1/threads/%s/permission", threadID), nil)
+	return err == nil
+}
+
+func doAPI(client *http.Client, baseURL, token, method, path string, body interface{}) (json.RawMessage, error) {
+	var buf bytes.Buffer
+	if body != nil {
+		if err := json.NewEncoder(&buf).Encode(body); err != nil {
+			return nil, err
+		}
+	}
+	req, err := http.NewRequest(method, baseURL+path, &buf)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var parsed apiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return nil, err
+	}
+	if !parsed.Success {
+		return nil, errors.New(parsed.Message)
+	}
+	return parsed.Data, nil
+}
+
+func ctxValue(ctx context.Context, key ctxKey) string {
+	if ctx == nil {
+		return ""
+	}
+	val := ctx.Value(key)
+	if val == nil {
+		return ""
+	}
+	if s, ok := val.(string); ok {
+		return s
+	}
+	return ""
 }
 
 func randomID(prefix string) string {
-	return fmt.Sprintf("%s_%d", prefix, time.Now().UnixNano())
-}
-
-func getEnv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-
-func getEnvInt(key string, fallback int) int {
-	if v := os.Getenv(key); v != "" {
-		if parsed, err := strconv.Atoi(v); err == nil {
-			return parsed
-		}
-	}
-	return fallback
+	now := time.Now().UnixNano()
+	return fmt.Sprintf("%s_%d", prefix, now)
 }

@@ -121,16 +121,21 @@ function buildExperienceUpdate(payload) {
       updates[column] = transform(payload[key]);
     }
   };
+  const asJsonb = (value) => {
+    if (value === null || value === undefined) return null;
+    if (typeof value === 'string') return value;
+    return JSON.stringify(value);
+  };
 
   mapField('title', 'title', (v) => (v ?? '').toString());
   mapField('summary', 'summary', (v) => (v ?? '').toString());
   mapField('description', 'description', (v) => (v ?? '').toString());
   mapField('city', 'city', (v) => (v ?? '').toString());
   mapField('meetingPoint', 'meeting_point', (v) => (v ?? '').toString());
-  mapField('languages', 'languages', (v) => (Array.isArray(v) ? v : []));
+  mapField('languages', 'languages', (v) => asJsonb(Array.isArray(v) ? v : []));
   mapField('category', 'category', (v) => (v ?? '').toString());
   mapField('durationMinutes', 'duration_minutes', (v) => Number(v ?? 0));
-  mapField('availability', 'availability', (v) => (Array.isArray(v) ? v : []));
+  mapField('availability', 'availability', (v) => asJsonb(Array.isArray(v) ? v : []));
   mapField('minGuests', 'min_guests', (v) => Number(v ?? 1));
   mapField('maxGuests', 'max_guests', (v) => Number(v ?? 1));
   mapField('minAdvanceHours', 'min_advance_hours', (v) => Number(v ?? 0));
@@ -139,11 +144,11 @@ function buildExperienceUpdate(payload) {
   mapField('currency', 'currency', (v) => (v ?? 'CNY').toString());
   mapField('cancellationPolicy', 'cancellation_policy', (v) => (v ?? 'flexible').toString());
   mapField('coverImageUrl', 'cover_image_url', (v) => (v ?? '').toString());
-  mapField('gallery', 'gallery_urls', (v) => (Array.isArray(v) ? v : []));
+  mapField('gallery', 'gallery_urls', (v) => asJsonb(Array.isArray(v) ? v : []));
   mapField('safetyNotes', 'safety_notes', (v) => (v ?? '').toString());
   mapField('meetupNotes', 'meetup_notes', (v) => (v ?? '').toString());
-  mapField('ageRestriction', 'age_restriction', (v) => v ?? null);
-  mapField('tags', 'tags', (v) => (Array.isArray(v) ? v : []));
+  mapField('ageRestriction', 'age_restriction', (v) => asJsonb(v ?? null));
+  mapField('tags', 'tags', (v) => asJsonb(Array.isArray(v) ? v : []));
 
   return updates;
 }

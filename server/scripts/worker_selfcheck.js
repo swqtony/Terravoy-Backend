@@ -36,7 +36,7 @@ async function main() {
     const countRes = await client.query(
       `select count(*)::int as count
        from match_sessions
-       where conversation_id is null
+       where thread_id is null
          and status in ('pending', 'matched')`
     );
     const count = countRes.rows[0]?.count ?? 0;
@@ -45,8 +45,8 @@ async function main() {
     if (count > 0) {
       const rowRes = await client.query(
         `select id, status, request_a_id, request_b_id, created_at
-         from match_sessions
-         where conversation_id is null
+        from match_sessions
+        where thread_id is null
            and status in ('pending', 'matched')
          order by created_at desc
          limit 1`

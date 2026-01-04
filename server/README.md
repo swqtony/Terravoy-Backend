@@ -7,7 +7,7 @@ docker compose exec api npm run db:migrate
 bash tools/curl_smoke_test.sh
 ```
 
-鉴权/授权模型详见：`docs/auth_and_authorization.md`（新增 SMS Auth + 短期 JWT，LeanCloud Session 仅 legacy 保留）。
+鉴权/授权模型详见：`docs/auth_and_authorization.md`（新增 SMS Auth + 短期 JWT）。
 
 ## 环境
 - Node.js 20+
@@ -66,7 +66,7 @@ npm run db:migrate --prefix server
   - `POST /functions/v1/auth/sms/verify`
   - `POST /functions/v1/auth/refresh`
   - `POST /functions/v1/auth/logout`
-- Legacy（依赖 LeanCloud Session）：
+- Legacy：
   - `POST /functions/v1/auth-supabase-login`
   - `POST /functions/v1/terra-auth`
 - Supabase 兼容：
@@ -81,9 +81,9 @@ npm run db:migrate --prefix server
   - `POST /functions/v1/preferences-update|preferences-fetch`（返回 501，原项目未提供实现）
   - 订单多路复用：`/functions/v1/orders`（支持 x-route/x-path 兼容 supabase edge，或直接调用 `/orders/create`, `/orders/{id}/accept|reject|cancel|start|end|mark_paid|review`, `/orders/my`, `/host/orders`, `/orders/{id}`）
 - 偏好持久化：`GET|PUT|DELETE /api/v1/preferences/match`（任意 JSON 按原样存储/读取；`match-start` 在缺省时会自动复用）
-- Storage 占位：`/storage/*` 与 `/functions/v1/storage/*` 统一返回 501（文件上传/UGC/认证材料由 LeanCloud 负责）
+- Storage 占位：`/storage/*` 与 `/functions/v1/storage/*` 统一返回 501（文件上传/UGC/认证材料走对象存储）
 
-所有需要用户身份的接口优先使用 `Authorization: Bearer <accessToken>`（Auth v0.1），Legacy 模式下可读取 `X-LeanCloud-UserId` + `X-LC-Session`/`X-LeanCloud-SessionToken`。
+所有需要用户身份的接口使用 `Authorization: Bearer <accessToken>`（Auth v0.1）。
 
 ### Profile 说明（Self-hosted）
 - `POST /functions/v1/profile-bootstrap`：仅 Bearer，`{}` 空 body，返回 `profileId`/`isCompleted`。

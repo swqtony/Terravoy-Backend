@@ -13,6 +13,20 @@ function normalizeString(value) {
   return (value || '').toString().trim();
 }
 
+// Safely parse JSONB column that may be a string or already an array
+function safeArray(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string' && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
 function normalizeProfile(existing, incoming) {
   if (!incoming || typeof incoming !== 'object') return existing || {};
   const base = existing && typeof existing === 'object' ? existing : {};
@@ -73,7 +87,7 @@ function serializeState(row) {
   const latestPayload = {
     credentials: row.profile?.credentials || {},
     compliance: row.profile?.compliance || {},
-    documents: (row.documents || []).map((doc) => ({
+    documents: safeArray(row.documents).map((doc) => ({
       id: doc.media_asset_id || doc.id || '',
       mediaAssetId: doc.media_asset_id || doc.id || '',
       objectKey: doc.object_key || '',
@@ -108,7 +122,7 @@ function buildAdminListItem(row) {
     submittedAt: row.submitted_at ? row.submitted_at.toISOString() : null,
     reviewedAt: row.reviewed_at ? row.reviewed_at.toISOString() : null,
     profile: row.profile || {},
-    documents: (row.documents || []).map((doc) => ({
+    documents: safeArray(row.documents).map((doc) => ({
       mediaAssetId: doc.media_asset_id,
       objectKey: doc.object_key,
       docType: doc.doc_type,
@@ -249,7 +263,7 @@ export default async function hostCertificationRoutes(app) {
            (user_id, status, profile, documents, created_at, updated_at)
            values ($1, 'draft', $2, $3, now(), now())
            returning *`,
-          [auth.userId, profile, documents]
+          [auth.userId, JSON.stringify(profile), JSON.stringify(documents)]
         );
         nextRow = insert.rows[0];
         await insertAudit(pool, nextRow.id, auth.userId, 'draft_saved', {
@@ -257,20 +271,22 @@ export default async function hostCertificationRoutes(app) {
           documentsCount: documents.length,
         });
       } else {
-        if (!ALLOWED_UPDATE_STATUSES.has(existing.status)) {
+      if (!ALLOWED_UPDATE_STATUSES.has(existing.status)) {
+        if (!(config.flags.hostCertAutoApprove && existing.status === 'submitted')) {
           return error(reply, 'INVALID_STATUS', 'Cannot edit certification in current status', 409);
         }
+      }
         const profile = normalizeProfile(existing.profile || {}, incomingProfile);
         const documents = Array.isArray(incomingDocuments)
           ? incomingDocuments
-          : existing.documents || [];
+          : safeArray(existing.documents);
         const update = await pool.query(
           `update host_certifications
            set status = 'draft', profile = $1, documents = $2,
                submitted_at = null, reviewed_at = null, reviewer_id = null,
                reject_reason = null, updated_at = now()
            where id = $3 returning *`,
-          [profile, documents, existing.id]
+          [JSON.stringify(profile), JSON.stringify(documents), existing.id]
         );
         nextRow = update.rows[0];
         await insertAudit(pool, existing.id, auth.userId, 'draft_saved', {
@@ -307,9 +323,11 @@ export default async function hostCertificationRoutes(app) {
         return error(reply, 'NOT_FOUND', 'Host certification not found', 404);
       }
       if (!SUBMIT_ALLOWED_STATUSES.has(existing.status)) {
-        return error(reply, 'INVALID_STATUS', 'Certification already submitted', 409);
+        if (!(config.flags.hostCertAutoApprove && existing.status === 'submitted')) {
+          return error(reply, 'INVALID_STATUS', 'Certification already submitted', 409);
+        }
       }
-      const documents = Array.isArray(existing.documents) ? existing.documents : [];
+      const documents = safeArray(existing.documents);
       await validateDocuments(pool, auth.userId, documents);
 
       const update = await pool.query(
@@ -318,7 +336,7 @@ export default async function hostCertificationRoutes(app) {
          where id = $1 returning *`,
         [existing.id]
       );
-      const nextRow = update.rows[0];
+      let nextRow = update.rows[0];
       await insertAudit(pool, existing.id, auth.userId, 'submitted', {
         documentsCount: documents.length,
       });
@@ -326,6 +344,23 @@ export default async function hostCertificationRoutes(app) {
         'update experiences set host_cert_status = $1 where host_user_id = $2',
         ['submitted', auth.userId]
       );
+      if (config.flags.hostCertAutoApprove) {
+        const approved = await pool.query(
+          `update host_certifications
+           set status = 'approved', reviewed_at = now(), reviewer_id = $2,
+               reject_reason = null, updated_at = now()
+           where id = $1 returning *`,
+          [existing.id, auth.userId]
+        );
+        nextRow = approved.rows[0];
+        await insertAudit(pool, existing.id, auth.userId, 'approved', {
+          autoApproved: true,
+        });
+        await pool.query(
+          'update experiences set host_cert_status = $1 where host_user_id = $2',
+          ['approved', auth.userId]
+        );
+      }
       clearApprovedHostCache(auth.userId);
       return ok(reply, { state: serializeState(nextRow) });
     } catch (err) {

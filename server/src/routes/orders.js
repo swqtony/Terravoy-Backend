@@ -80,18 +80,18 @@ function serializeReview(review, order) {
   };
 }
 
-function requireLeancloudUserId(leancloudUserId) {
-  if (!leancloudUserId || String(leancloudUserId).trim().length === 0) {
-    const err = new Error('leancloudUserId is required');
-    err.code = 'LEAN_USER_ID_REQUIRED';
+function requireUserId(userId) {
+  if (!userId || String(userId).trim().length === 0) {
+    const err = new Error('userId is required');
+    err.code = 'USER_ID_REQUIRED';
     err.statusCode = 400;
     throw err;
   }
-  return String(leancloudUserId).trim();
+  return String(userId).trim();
 }
 
-async function ensureProfile(pool, leancloudUserId) {
-  const validated = requireLeancloudUserId(leancloudUserId);
+async function ensureProfile(pool, userId) {
+  const validated = requireUserId(userId);
   const { rows } = await pool.query(
     'select ensure_profile_v2($1, $2) as id',
     [validated, null]
@@ -102,9 +102,9 @@ async function ensureProfile(pool, leancloudUserId) {
 async function fetchOrder(pool, orderId) {
   const { rows } = await pool.query(
     `select o.*,
-            host_profile.leancloud_user_id as "hostLeancloudUserId",
+            host_profile.id as "hostUserId",
             host_profile.nickname as "host_nickname",
-            traveler_profile.leancloud_user_id as "travelerLeancloudUserId",
+            traveler_profile.id as "travelerUserId",
             traveler_profile.nickname as "traveler_nickname",
             coalesce(refund.status, o.refund_status) as refund_status,
             coalesce(refund.processed_at, o.refund_at) as refund_at,
@@ -181,13 +181,14 @@ async function handleCreate(pool, req, reply, actor) {
     return error(reply, 'INVALID_INPUT', 'Missing required fields', 400);
   }
   const profileId = await ensureProfile(pool, actor.userId);
+  const hostProfileId = await ensureProfile(pool, hostId);
   authorize({ ...actor, profileId }, 'orders:create');
 
   const { rows: existingRows } = await pool.query(
     `select * from orders
      where traveler_id = $1 and host_id = $2 and experience_id = $3 and start_time = $4
      order by created_at desc limit 1`,
-    [profileId, hostId, experienceId, startTime]
+    [profileId, hostProfileId, experienceId, startTime]
   );
   if (existingRows[0]) return ok(reply, existingRows[0]);
 
@@ -205,9 +206,9 @@ async function handleCreate(pool, req, reply, actor) {
              $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
      returning *`,
     [
-      orderNo,
-      profileId,
-      hostId,
+     orderNo,
+     profileId,
+      hostProfileId,
       experienceId,
       startTime,
       endTime,
@@ -487,9 +488,9 @@ async function handleMyOrders(pool, req, reply, actor, statusFilter) {
             o.experience_cover, o.city, o.meeting_point, o.language_preference, o.time_slot_label,
             o.tags, o.traveler_name, o.traveler_avatar, o.host_name, o.host_avatar, o.contact_phone,
             o.channel, o.visible_to_traveler, o.visible_to_host, o.refund_status, o.refund_at,
-            host_profile.leancloud_user_id as "hostLeancloudUserId",
+            host_profile.id as "hostUserId",
             host_profile.nickname as "host_nickname",
-            traveler_profile.leancloud_user_id as "travelerLeancloudUserId",
+            traveler_profile.id as "travelerUserId",
             traveler_profile.nickname as "traveler_nickname",
             exists(
               select 1 from reviews r
@@ -515,7 +516,7 @@ async function handleMyOrders(pool, req, reply, actor, statusFilter) {
 
 async function handleHostOrders(pool, req, reply, actor, statusFilter) {
   const profileId = await ensureProfile(pool, actor.userId);
-  const params = [profileId];
+  const params = [profileId, actor.userId];
   let sql =
     `select o.id, o.order_no, o.experience_id, o.traveler_id, o.host_id, o.start_time, o.status, o.payment_status,
             o.payment_method, o.payment_provider, o.payment_intent_id, o.paid_at, o.completed_at,
@@ -523,9 +524,9 @@ async function handleHostOrders(pool, req, reply, actor, statusFilter) {
             o.experience_cover, o.city, o.meeting_point, o.language_preference, o.time_slot_label,
             o.tags, o.traveler_name, o.traveler_avatar, o.host_name, o.host_avatar, o.contact_phone,
             o.channel, o.visible_to_traveler, o.visible_to_host, o.refund_status, o.refund_at,
-            host_profile.leancloud_user_id as "hostLeancloudUserId",
+            host_profile.id as "hostUserId",
             host_profile.nickname as "host_nickname",
-            traveler_profile.leancloud_user_id as "travelerLeancloudUserId",
+            traveler_profile.id as "travelerUserId",
             traveler_profile.nickname as "traveler_nickname",
             exists(
               select 1 from reviews r
@@ -538,10 +539,10 @@ async function handleHostOrders(pool, req, reply, actor, statusFilter) {
      from orders o
      left join profiles host_profile on host_profile.id = o.host_id
      left join profiles traveler_profile on traveler_profile.id = o.traveler_id
-     where o.host_id = $1`;
+     where o.host_id = $1 or o.host_id = $2`;
   if (statusFilter) {
     params.push(statusFilter);
-    sql += ' and status = $2';
+    sql += ' and status = $3';
   }
   sql += ' order by created_at desc';
   const { rows } = await pool.query(sql, params);

@@ -1,9 +1,19 @@
 FROM golang:1.22-alpine AS build
+ARG GOPROXY
+ARG GOSUMDB
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ENV GOPROXY=$GOPROXY
+ENV GOSUMDB=$GOSUMDB
+ENV HTTP_PROXY=$HTTP_PROXY
+ENV HTTPS_PROXY=$HTTPS_PROXY
+ENV NO_PROXY=$NO_PROXY
 WORKDIR /app
-COPY go.mod ./
+COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN go build -o /out/im-gateway ./...
+RUN go build -o /out/im-gateway .
 
 FROM alpine:3.20
 WORKDIR /app

@@ -23,6 +23,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"terravoy/im/im-api/internal/redisx"
 )
 
 type Config struct {
@@ -38,12 +39,15 @@ type Config struct {
 	RateUserWindowMs     int
 	RateThreadMax        int
 	RateThreadWindowMs   int
+	EnvName              string
 	OSSEndpoint          string
-	OSSBucketPublic      string
+	OSSBucketIM          string
 	OSSAccessKeyID       string
 	OSSAccessKeySecret   string
-	OSSPublicBaseURL     string
-	OSSUploadExpiresSecs int
+	OSSIMPublicBaseURL   string
+	OSSUploadExpiresSecs   int
+	OSSIMUploadExpiresSecs int
+	OSSIMRetentionDays     int  // IM 消息媒体文件保留天数，0=不自动配置生命周期
 }
 
 type ctxKey string
@@ -62,34 +66,23 @@ var (
 		},
 		[]string{"method", "route", "status"},
 	)
+	dbWriteLatency = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "db_write_latency_ms",
+		Help:    "IM API DB write latency in ms",
+		Buckets: []float64{5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000},
+	})
+	messagesWrittenTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "messages_written_total",
+		Help: "Total messages written by IM API",
+	})
 )
-
-const rateLua = `
-local key = KEYS[1]
-local window_ms = tonumber(ARGV[1])
-local max_hits = tonumber(ARGV[2])
-local now = redis.call('TIME')
-local now_ms = (now[1] * 1000) + math.floor(now[2] / 1000)
-local window_start = now_ms - window_ms
-redis.call('ZREMRANGEBYSCORE', key, 0, window_start)
-local count = redis.call('ZCARD', key)
-if count >= max_hits then
-  local earliest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
-  local oldest = tonumber(earliest[2]) or now_ms
-  local retry_after_ms = oldest + window_ms - now_ms
-  if retry_after_ms < 0 then retry_after_ms = 0 end
-  return {0, retry_after_ms}
-end
-redis.call('ZADD', key, now_ms, tostring(now_ms))
-redis.call('PEXPIRE', key, window_ms + 1000)
-return {1, 0}
-`
 
 func main() {
 	cfg := loadConfig()
 	setupLogger()
 
 	prometheus.MustRegister(httpDuration)
+	prometheus.MustRegister(dbWriteLatency, messagesWrittenTotal)
 
 	pool, err := pgxpool.New(context.Background(), cfg.DBDsn)
 	if err != nil {
@@ -97,8 +90,12 @@ func main() {
 	}
 	redisClient := newRedisClient(cfg.RedisURL)
 
+	// 自动配置 OSS IM Bucket 生命周期规则
+	setupOSSLifecycle(cfg)
+
 	router := chi.NewRouter()
 	router.Use(traceMiddleware)
+	router.Use(accessLogMiddleware)
 	router.Use(metricsMiddleware)
 	router.Get("/metrics", promhttp.Handler().ServeHTTP)
 	router.Get("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -170,12 +167,15 @@ func loadConfig() Config {
 		RateUserWindowMs:     envInt("IM_RATE_USER_WINDOW_MS", 10000),
 		RateThreadMax:        envInt("IM_RATE_THREAD_MAX", 30),
 		RateThreadWindowMs:   envInt("IM_RATE_THREAD_WINDOW_MS", 10000),
+		EnvName:              env("NODE_ENV", "dev"),
 		OSSEndpoint:          env("OSS_ENDPOINT", ""),
-		OSSBucketPublic:      env("OSS_BUCKET_PUBLIC", ""),
+		OSSBucketIM:          env("OSS_BUCKET_IM", ""),
 		OSSAccessKeyID:       env("OSS_ACCESS_KEY_ID", ""),
 		OSSAccessKeySecret:   env("OSS_ACCESS_KEY_SECRET", ""),
-		OSSPublicBaseURL:     env("OSS_PUBLIC_BASE_URL", ""),
-		OSSUploadExpiresSecs: envInt("OSS_UPLOAD_EXPIRES_SECONDS", 900),
+		OSSIMPublicBaseURL:   env("OSS_IM_PUBLIC_BASE_URL", ""),
+		OSSUploadExpiresSecs:   envInt("OSS_UPLOAD_EXPIRES_SECONDS", 900),
+		OSSIMUploadExpiresSecs: envInt("OSS_IM_UPLOAD_EXPIRES_SECONDS", envInt("OSS_UPLOAD_EXPIRES_SECONDS", 900)),
+		OSSIMRetentionDays:     envInt("OSS_IM_RETENTION_DAYS", 90), // 默认90天
 	}
 }
 
@@ -195,6 +195,57 @@ func envInt(key string, fallback int) int {
 	return fallback
 }
 
+// setupOSSLifecycle 自动配置 OSS IM Bucket 的生命周期规则
+// 根据 OSSIMRetentionDays 设置消息媒体文件的过期删除规则
+func setupOSSLifecycle(cfg Config) {
+	if cfg.OSSIMRetentionDays <= 0 {
+		log.Info().Msg("OSS lifecycle disabled (OSS_IM_RETENTION_DAYS <= 0)")
+		return
+	}
+	if cfg.OSSEndpoint == "" || cfg.OSSBucketIM == "" || cfg.OSSAccessKeyID == "" || cfg.OSSAccessKeySecret == "" {
+		log.Warn().Msg("OSS lifecycle skipped: missing OSS configuration")
+		return
+	}
+
+	client, err := oss.New(cfg.OSSEndpoint, cfg.OSSAccessKeyID, cfg.OSSAccessKeySecret)
+	if err != nil {
+		log.Error().Err(err).Msg("OSS lifecycle: failed to create client")
+		return
+	}
+
+	bucket, err := client.Bucket(cfg.OSSBucketIM)
+	if err != nil {
+		log.Error().Err(err).Msg("OSS lifecycle: failed to get bucket")
+		return
+	}
+
+	// 定义生命周期规则：im/ 前缀下的文件在 N 天后过期删除
+	ruleID := "im-message-media-expire"
+	rules := []oss.LifecycleRule{
+		{
+			ID:     ruleID,
+			Prefix: "im/",
+			Status: "Enabled",
+			Expiration: &oss.LifecycleExpiration{
+				Days: cfg.OSSIMRetentionDays,
+			},
+		},
+	}
+
+	err = bucket.SetBucketLifecycle(rules)
+	if err != nil {
+		log.Error().Err(err).Int("days", cfg.OSSIMRetentionDays).Msg("OSS lifecycle: failed to set rule")
+		return
+	}
+
+	log.Info().
+		Str("bucket", cfg.OSSBucketIM).
+		Str("prefix", "im/").
+		Int("expire_days", cfg.OSSIMRetentionDays).
+		Msg("OSS lifecycle rule configured successfully")
+}
+
+
 func traceMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		trace := r.Header.Get("X-Trace-Id")
@@ -204,6 +255,22 @@ func traceMiddleware(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), ctxTraceID, trace)
 		w.Header().Set("X-Trace-Id", trace)
 		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func accessLogMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		wrapped := &wrapWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(wrapped, r)
+		trace := ctxValue(r, ctxTraceID)
+		log.Info().
+			Str("trace_id", trace).
+			Str("method", r.Method).
+			Str("path", r.URL.Path).
+			Int("status", wrapped.status).
+			Int64("latency_ms", time.Since(start).Milliseconds()).
+			Msg("im-api access")
 	})
 }
 
@@ -290,7 +357,7 @@ func handleEnsureThread(w http.ResponseWriter, r *http.Request, pool *pgxpool.Po
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "invalid json")
 		return
 	}
-	if payload.Type != "match" && payload.Type != "order" && payload.Type != "support" {
+	if payload.Type != "match" && payload.Type != "order" {
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "invalid type")
 		return
 	}
@@ -302,7 +369,7 @@ func handleEnsureThread(w http.ResponseWriter, r *http.Request, pool *pgxpool.Po
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "order_id required")
 		return
 	}
-	if payload.Type != "support" && len(payload.Members) < 2 {
+	if len(payload.Members) < 2 {
 		writeError(w, r, http.StatusBadRequest, "INVALID_MEMBERS", "members required")
 		return
 	}
@@ -336,30 +403,27 @@ func handleEnsureThread(w http.ResponseWriter, r *http.Request, pool *pgxpool.Po
 		LastSeq        int64
 		LastMessageAt  *time.Time
 	}
+	retentionDays := 14
+	if payload.Type == "order" {
+		retentionDays = 180
+	}
 	if payload.Type == "match" {
 		err = tx.QueryRow(ctx, `
-			insert into chat_threads (type, match_session_id)
-			values ($1, $2)
+			insert into chat_threads (type, match_session_id, retention_days, sync_policy)
+			values ($1, $2, $3, 'local_first')
 			on conflict (match_session_id)
 			do update set updated_at = now()
 			returning id, type, status, match_session_id, order_id, last_seq, last_message_at`,
-			payload.Type, payload.MatchSessionID,
+			payload.Type, payload.MatchSessionID, retentionDays,
 		).Scan(&row.ID, &row.Type, &row.Status, &row.MatchSessionID, &row.OrderID, &row.LastSeq, &row.LastMessageAt)
 	} else if payload.Type == "order" {
 		err = tx.QueryRow(ctx, `
-			insert into chat_threads (type, order_id)
-			values ($1, $2)
+			insert into chat_threads (type, order_id, retention_days, sync_policy)
+			values ($1, $2, $3, 'local_first')
 			on conflict (order_id)
 			do update set updated_at = now()
 			returning id, type, status, match_session_id, order_id, last_seq, last_message_at`,
-			payload.Type, payload.OrderID,
-		).Scan(&row.ID, &row.Type, &row.Status, &row.MatchSessionID, &row.OrderID, &row.LastSeq, &row.LastMessageAt)
-	} else {
-		err = tx.QueryRow(ctx, `
-			insert into chat_threads (type)
-			values ($1)
-			returning id, type, status, match_session_id, order_id, last_seq, last_message_at`,
-			payload.Type,
+			payload.Type, payload.OrderID, retentionDays,
 		).Scan(&row.ID, &row.Type, &row.Status, &row.MatchSessionID, &row.OrderID, &row.LastSeq, &row.LastMessageAt)
 	}
 	if err != nil {
@@ -479,7 +543,7 @@ func handleReadThread(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool
 	}
 	tag, err := pool.Exec(r.Context(), `
 		update chat_thread_members
-		set last_read_seq = greatest(last_read_seq, $1), updated_at = now()
+		set last_read_seq = greatest(last_read_seq, $1)
 		where thread_id = $2 and user_id = $3`,
 		payload.LastReadSeq, threadID, userID,
 	)
@@ -499,13 +563,14 @@ func handleListMessages(w http.ResponseWriter, r *http.Request, pool *pgxpool.Po
 	threadID := chi.URLParam(r, "id")
 	var ttype string
 	var lastSeq int64
+	var retentionDays int
 	err := pool.QueryRow(r.Context(), `
-		select t.type, t.last_seq
+		select t.type, t.last_seq, t.retention_days
 		from chat_threads t
 		join chat_thread_members m on m.thread_id = t.id
 		where t.id = $1 and m.user_id = $2`,
 		threadID, userID,
-	).Scan(&ttype, &lastSeq)
+	).Scan(&ttype, &lastSeq, &retentionDays)
 	if err != nil {
 		writeError(w, r, http.StatusForbidden, "FORBIDDEN", "not a member")
 		return
@@ -513,9 +578,11 @@ func handleListMessages(w http.ResponseWriter, r *http.Request, pool *pgxpool.Po
 	afterSeq := queryInt64(r, "afterSeq")
 	beforeSeq := queryInt64(r, "beforeSeq")
 	limit := clampInt(queryInt(r, "limit", 50), 1, 200)
-	retentionDays := cfg.RetentionOrderDays
-	if ttype == "match" {
-		retentionDays = cfg.RetentionMatchDays
+	if retentionDays <= 0 {
+		retentionDays = cfg.RetentionOrderDays
+		if ttype == "match" {
+			retentionDays = cfg.RetentionMatchDays
+		}
 	}
 	cutoff := time.Now().AddDate(0, 0, -retentionDays)
 
@@ -587,6 +654,7 @@ func handleListMessages(w http.ResponseWriter, r *http.Request, pool *pgxpool.Po
 
 func handleCreateMessage(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, redisClient *redis.Client, cfg Config) {
 	userID := ctxValue(r, ctxUserID)
+	start := time.Now()
 	var payload struct {
 		ThreadID    string          `json:"thread_id"`
 		ClientMsgID string          `json:"client_msg_id"`
@@ -605,15 +673,21 @@ func handleCreateMessage(w http.ResponseWriter, r *http.Request, pool *pgxpool.P
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "invalid message type")
 		return
 	}
-	if redisClient != nil {
-		if allowed, _ := checkRate(redisClient, fmt.Sprintf("im:rate:user:%s", userID), cfg.RateUserWindowMs, cfg.RateUserMax); !allowed {
-			writeError(w, r, http.StatusTooManyRequests, "RATE_LIMITED", "user rate limited")
+	if payload.Type == "image" {
+		normalized, err := normalizeImageContent(payload.Content, userID, cfg)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_IMAGE_CONTENT", err.Error())
 			return
 		}
-		if allowed, _ := checkRate(redisClient, fmt.Sprintf("im:rate:thread:%s", payload.ThreadID), cfg.RateThreadWindowMs, cfg.RateThreadMax); !allowed {
-			writeError(w, r, http.StatusTooManyRequests, "RATE_LIMITED", "thread rate limited")
-			return
-		}
+		payload.Content = normalized
+	}
+	if allowed, _, err := redisx.AllowRate(r.Context(), redisClient, redisx.KeyRateUser(userID), cfg.RateUserWindowMs, cfg.RateUserMax); err == nil && !allowed {
+		writeError(w, r, http.StatusTooManyRequests, "RATE_LIMITED", "user rate limited")
+		return
+	}
+	if allowed, _, err := redisx.AllowRate(r.Context(), redisClient, redisx.KeyRateThread(payload.ThreadID), cfg.RateThreadWindowMs, cfg.RateThreadMax); err == nil && !allowed {
+		writeError(w, r, http.StatusTooManyRequests, "RATE_LIMITED", "thread rate limited")
+		return
 	}
 
 	ctx := r.Context()
@@ -711,11 +785,150 @@ func handleCreateMessage(w http.ResponseWriter, r *http.Request, pool *pgxpool.P
 		writeError(w, r, http.StatusInternalServerError, "SERVER_ERROR", "db error")
 		return
 	}
+	enqueuePushJobs(ctx, pool, redisClient, payload.ThreadID, userID, msgID, nextSeq, payload.Type, payload.Content, createdAt)
+	latencyMs := time.Since(start).Milliseconds()
+	dbWriteLatency.Observe(float64(latencyMs))
+	messagesWrittenTotal.Inc()
+	trace := ctxValue(r, ctxTraceID)
+	log.Info().
+		Str("trace_id", trace).
+		Str("user_id", userID).
+		Str("thread_id", payload.ThreadID).
+		Str("msg_id", msgID).
+		Int64("seq", nextSeq).
+		Int64("latency_ms", latencyMs).
+		Str("err_code", "").
+		Msg("message written")
 	writeJSON(w, r, http.StatusOK, map[string]any{
 		"msg_id":     msgID,
 		"seq":        nextSeq,
 		"created_at": createdAt,
 	})
+}
+
+type imageContent struct {
+	URL       string `json:"url"`
+	ObjectKey string `json:"object_key"`
+	Mime      string `json:"mime"`
+	Width     int    `json:"width"`
+	Height    int    `json:"height"`
+	Size      int64  `json:"size"`
+}
+
+func normalizeImageContent(raw json.RawMessage, userID string, cfg Config) (json.RawMessage, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, errors.New("image content required")
+	}
+	var content imageContent
+	if err := json.Unmarshal(raw, &content); err != nil {
+		return nil, errors.New("invalid image content")
+	}
+	content.ObjectKey = strings.TrimSpace(content.ObjectKey)
+	content.URL = strings.TrimSpace(content.URL)
+	content.Mime = strings.TrimSpace(content.Mime)
+	if content.URL == "" || content.Mime == "" {
+		return nil, errors.New("url/mime required")
+	}
+	if content.Width <= 0 || content.Height <= 0 || content.Size <= 0 {
+		return nil, errors.New("width/height/size required")
+	}
+	if !strings.HasPrefix(content.Mime, "image/") {
+		return nil, errors.New("mime must be image/*")
+	}
+	objectKey, err := parseObjectKeyFromURL(content.URL, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if content.ObjectKey != "" && content.ObjectKey != objectKey {
+		return nil, errors.New("object_key mismatch")
+	}
+	content.ObjectKey = objectKey
+	if err := validateIMObjectKey(content.ObjectKey, cfg.EnvName); err != nil {
+		return nil, err
+	}
+	ext := ""
+	if idx := strings.LastIndex(content.ObjectKey, "."); idx != -1 && idx < len(content.ObjectKey)-1 {
+		ext = content.ObjectKey[idx+1:]
+	}
+	if ext == "" || !isAllowedExt(ext) {
+		return nil, errors.New("object_key ext invalid")
+	}
+	normalized, err := json.Marshal(content)
+	if err != nil {
+		return nil, errors.New("invalid image content")
+	}
+	return normalized, nil
+}
+
+func enqueuePushJobs(ctx context.Context, pool *pgxpool.Pool, redisClient *redis.Client, threadID, senderID, msgID string, seq int64, msgType string, content json.RawMessage, createdAt time.Time) {
+	if redisClient == nil {
+		return
+	}
+	rows, err := pool.Query(ctx, `
+		select user_id
+		from chat_thread_members
+		where thread_id = $1 and user_id <> $2`, threadID, senderID)
+	if err != nil {
+		log.Error().Err(err).Msg("push enqueue members query failed")
+		return
+	}
+	defer rows.Close()
+	preview := buildPushPreview(msgType, content)
+	for rows.Next() {
+		var toUserID string
+		if err := rows.Scan(&toUserID); err != nil {
+			log.Error().Err(err).Msg("push enqueue scan failed")
+			continue
+		}
+		if isUserOnline(ctx, redisClient, toUserID) {
+			continue
+		}
+		payload := map[string]any{
+			"to_user_id":       toUserID,
+			"thread_id":        threadID,
+			"msg_id":           msgID,
+			"seq":              seq,
+			"msg_type":         msgType,
+			"preview":          preview,
+			"created_at":       createdAt.Format(time.RFC3339),
+			"attempt":          0,
+			"available_at_ms":  0,
+		}
+		if _, err := redisClient.XAdd(ctx, &redis.XAddArgs{Stream: redisx.PushStreamKey, Values: payload}).Result(); err != nil {
+			log.Error().Err(err).Str("to_user_id", toUserID).Msg("push enqueue failed")
+		}
+	}
+}
+
+func isUserOnline(ctx context.Context, redisClient *redis.Client, userID string) bool {
+	if redisClient == nil || userID == "" {
+		return false
+	}
+	key := redisx.KeyPresence(userID)
+	exists, err := redisClient.Exists(ctx, key).Result()
+	if err != nil {
+		return false
+	}
+	return exists > 0
+}
+
+func buildPushPreview(msgType string, content json.RawMessage) string {
+	switch msgType {
+	case "image":
+		return "[图片]"
+	case "order_event":
+		return "[订单更新]"
+	case "system":
+		return ""
+	default:
+		var body map[string]any
+		if err := json.Unmarshal(content, &body); err == nil {
+			if text, ok := body["text"].(string); ok {
+				return text
+			}
+		}
+	}
+	return ""
 }
 
 func handlePermission(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
@@ -793,8 +1006,8 @@ func handlePushToken(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool)
 	_, err := pool.Exec(r.Context(), `
 		insert into device_tokens (user_id, platform, token, updated_at)
 		values ($1, $2, $3, now())
-		on conflict (user_id, platform)
-		do update set token = excluded.token, updated_at = now()`,
+		on conflict (platform, token)
+		do update set user_id = excluded.user_id, updated_at = now()`,
 		userID, payload.Platform, payload.Token,
 	)
 	if err != nil {
@@ -805,67 +1018,188 @@ func handlePushToken(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool)
 }
 
 func handleMediaUpload(w http.ResponseWriter, r *http.Request, cfg Config) {
+	trace := ctxValue(r, ctxTraceID)
 	var payload struct {
-		Scope string `json:"scope"`
-		Ext   string `json:"ext"`
-		Mime  string `json:"mime"`
-		Size  int64  `json:"size"`
+		Scope    string `json:"scope"`
+		Filename string `json:"filename"`
+		Ext      string `json:"ext"`
+		Mime     string `json:"mime"`
+		Size     int64  `json:"size"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		log.Warn().Str("trace_id", trace).Msg("im media upload invalid json")
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "invalid json")
 		return
 	}
 	if payload.Scope != "im_message" {
+		log.Warn().Str("trace_id", trace).Msg("im media upload invalid scope")
 		writeError(w, r, http.StatusBadRequest, "INVALID_SCOPE", "invalid scope")
 		return
 	}
-	if !isAllowedExt(payload.Ext) || payload.Size <= 0 {
+	ext := strings.TrimPrefix(strings.ToLower(payload.Ext), ".")
+	if ext == "" && payload.Filename != "" {
+		if idx := strings.LastIndex(payload.Filename, "."); idx != -1 && idx < len(payload.Filename)-1 {
+			ext = strings.ToLower(payload.Filename[idx+1:])
+		}
+	}
+	if !isAllowedExt(ext) || payload.Size <= 0 {
+		log.Warn().Str("trace_id", trace).Msg("im media upload invalid ext/size")
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "invalid ext/size")
 		return
 	}
-	if cfg.OSSEndpoint == "" || cfg.OSSBucketPublic == "" || cfg.OSSAccessKeyID == "" || cfg.OSSAccessKeySecret == "" {
+	if cfg.OSSEndpoint == "" || cfg.OSSBucketIM == "" || cfg.OSSAccessKeyID == "" || cfg.OSSAccessKeySecret == "" || cfg.OSSIMPublicBaseURL == "" {
+		log.Warn().Str("trace_id", trace).Msg("im media upload misconfig")
 		writeError(w, r, http.StatusBadRequest, "MISCONFIG", "oss not configured")
 		return
 	}
 	client, err := oss.New(cfg.OSSEndpoint, cfg.OSSAccessKeyID, cfg.OSSAccessKeySecret)
 	if err != nil {
+		log.Error().Str("trace_id", trace).Msg("im media upload oss init failed")
 		writeError(w, r, http.StatusInternalServerError, "STORAGE_ERROR", "oss error")
 		return
 	}
-	bucket, err := client.Bucket(cfg.OSSBucketPublic)
+	bucket, err := client.Bucket(cfg.OSSBucketIM)
 	if err != nil {
+		log.Error().Str("trace_id", trace).Msg("im media upload bucket error")
 		writeError(w, r, http.StatusInternalServerError, "STORAGE_ERROR", "oss error")
 		return
 	}
-	userID := ctxValue(r, ctxUserID)
-	objectKey := formatObjectKey("public", payload.Scope, userID, payload.Ext)
-	expires := time.Duration(cfg.OSSUploadExpiresSecs) * time.Second
-	signedURL, err := bucket.SignURL(objectKey, oss.HTTPPut, int64(expires.Seconds()), oss.ContentType(payload.Mime))
+	objectKey := formatIMObjectKey(cfg.EnvName, ext)
+	expiresSec := int64(cfg.OSSIMUploadExpiresSecs)
+	if expiresSec <= 0 {
+		expiresSec = int64(cfg.OSSUploadExpiresSecs)
+	}
+	if expiresSec <= 0 {
+		expiresSec = 900
+	}
+	signedURL, err := bucket.SignURL(objectKey, oss.HTTPPut, expiresSec, oss.ContentType(payload.Mime))
 	if err != nil {
+		log.Error().Str("trace_id", trace).Msg("im media upload sign failed")
 		writeError(w, r, http.StatusInternalServerError, "STORAGE_ERROR", "oss error")
 		return
 	}
-	publicURL := buildPublicURL(cfg, objectKey)
-	writeJSON(w, r, http.StatusOK, map[string]any{
-		"object_key": objectKey,
+	log.Info().Str("trace_id", trace).Str("object_key", objectKey).Int64("expires_in", expiresSec).Msg("im media upload url issued")
+	resp := map[string]any{
+		"success":    true,
 		"upload_url": signedURL,
-		"public_url": publicURL,
-		"expires_at": time.Now().Add(expires).Format(time.RFC3339),
-	})
-}
-
-func formatObjectKey(visibility, scope, userID, ext string) string {
-	now := time.Now().UTC()
-	return fmt.Sprintf("%s/%s/%s/%04d/%02d/%s.%s",
-		visibility, scope, userID, now.Year(), int(now.Month()), randomID("obj"), ext)
-}
-
-func buildPublicURL(cfg Config, objectKey string) string {
-	base := strings.TrimRight(cfg.OSSPublicBaseURL, "/")
-	if base == "" {
-		base = fmt.Sprintf("https://%s.%s", cfg.OSSBucketPublic, strings.TrimPrefix(cfg.OSSEndpoint, "https://"))
+		"object_key": objectKey,
+		"expires_in": expiresSec,
+		"method":     "PUT",
 	}
-	return fmt.Sprintf("%s/%s", base, objectKey)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func formatIMObjectKey(env, ext string) string {
+	now := time.Now().UTC()
+	env = sanitizeEnvName(env)
+	return fmt.Sprintf("im/%s/%04d/%02d/%s.%s",
+		env, now.Year(), int(now.Month()), newUUID(), ext)
+}
+
+func parseObjectKeyFromURL(url string, cfg Config) (string, error) {
+	base := strings.TrimRight(cfg.OSSIMPublicBaseURL, "/")
+	if base == "" {
+		return "", errors.New("public base url required")
+	}
+	if !strings.HasPrefix(url, base+"/") {
+		return "", errors.New("url invalid")
+	}
+	key := strings.TrimPrefix(url, base+"/")
+	if key == "" {
+		return "", errors.New("url invalid")
+	}
+	return key, nil
+}
+
+func validateIMObjectKey(key, env string) error {
+	parts := strings.Split(key, "/")
+	if len(parts) != 5 {
+		return errors.New("object_key format invalid")
+	}
+	if parts[0] != "im" {
+		return errors.New("object_key prefix invalid")
+	}
+	if parts[1] != sanitizeEnvName(env) {
+		return errors.New("object_key env invalid")
+	}
+	if len(parts[2]) != 4 || !isAllDigits(parts[2]) {
+		return errors.New("object_key year invalid")
+	}
+	if len(parts[3]) != 2 || !isAllDigits(parts[3]) {
+		return errors.New("object_key month invalid")
+	}
+	filename := parts[4]
+	dot := strings.LastIndex(filename, ".")
+	if dot <= 0 || dot == len(filename)-1 {
+		return errors.New("object_key filename invalid")
+	}
+	id := filename[:dot]
+	if !isUUID(id) {
+		return errors.New("object_key uuid invalid")
+	}
+	return nil
+}
+
+func sanitizeEnvName(env string) string {
+	env = strings.ToLower(strings.TrimSpace(env))
+	if env == "" {
+		return "dev"
+	}
+	clean := make([]rune, 0, len(env))
+	for _, r := range env {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			clean = append(clean, r)
+		}
+	}
+	if len(clean) == 0 {
+		return "dev"
+	}
+	return string(clean)
+}
+
+func isAllDigits(val string) bool {
+	for _, r := range val {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func isUUID(val string) bool {
+	if len(val) != 36 {
+		return false
+	}
+	for i, r := range val {
+		switch i {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return false
+			}
+		default:
+			if (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') {
+				continue
+			}
+			return false
+		}
+	}
+	return true
+}
+
+func newUUID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+		b[0], b[1], b[2], b[3],
+		b[4], b[5],
+		b[6], b[7],
+		b[8], b[9],
+		b[10], b[11], b[12], b[13], b[14], b[15],
+	)
 }
 
 func isAllowedExt(ext string) bool {
@@ -875,20 +1209,6 @@ func isAllowedExt(ext string) bool {
 	default:
 		return false
 	}
-}
-
-func checkRate(client *redis.Client, key string, windowMs int, max int) (bool, int64) {
-	res, err := client.Eval(context.Background(), rateLua, []string{key}, windowMs, max).Result()
-	if err != nil {
-		return true, 0
-	}
-	values, ok := res.([]interface{})
-	if !ok || len(values) < 2 {
-		return true, 0
-	}
-	allowed, _ := values[0].(int64)
-	retry, _ := values[1].(int64)
-	return allowed == 1, retry
 }
 
 func newRedisClient(url string) *redis.Client {
@@ -916,6 +1236,11 @@ func writeJSON(w http.ResponseWriter, r *http.Request, status int, body any) {
 
 func writeError(w http.ResponseWriter, r *http.Request, status int, code string, message string) {
 	trace := ctxValue(r, ctxTraceID)
+	log.Error().
+		Str("trace_id", trace).
+		Int("status", status).
+		Str("code", code).
+		Msg(message)
 	resp := map[string]any{
 		"success": false,
 		"code":    code,

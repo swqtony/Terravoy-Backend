@@ -17,6 +17,9 @@ const config = {
     connectTimeoutMs: Number(process.env.REDIS_CONNECT_TIMEOUT_MS) || 5000,
     maxRetries: Number(process.env.REDIS_MAX_RETRIES) || 50,
   },
+  im: {
+    apiBaseUrl: process.env.IM_API_BASE_URL || 'http://localhost:8090',
+  },
   terra: {
     jwtSecret: process.env.TERRA_JWT_SECRET || 'dev_terra_secret_change_me',
     devToken: process.env.TERRA_DEV_TOKEN || 'dev_terra_token',
@@ -100,6 +103,7 @@ const config = {
     devAuthBypass: process.env.DEV_AUTH_BYPASS === '1',
     paymentsWebhookOnly: process.env.PAYMENTS_WEBHOOK_ONLY !== '0',
     allowLegacyStorage: process.env.ALLOW_LEGACY_STORAGE === 'true',
+    hostCertAutoApprove: process.env.HOST_CERT_AUTO_APPROVE === '1',
   },
 };
 

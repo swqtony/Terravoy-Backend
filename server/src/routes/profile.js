@@ -3,6 +3,12 @@ import { requireAuth, respondAuthError } from '../services/authService.js';
 import { authorize } from '../services/authorize.js';
 
 const NICKNAME_MAX_LEN = 32;
+const DEFAULT_AVATAR_URL = 'https://picsum.photos/seed/me/200';
+
+function resolveAvatarUrl(raw) {
+  const trimmed = typeof raw === 'string' ? raw.trim() : '';
+  return trimmed || DEFAULT_AVATAR_URL;
+}
 
 function requireUserId(userId) {
   if (!userId || String(userId).trim().length === 0) {
@@ -25,7 +31,8 @@ async function ensureProfile(pool, userId, supabaseUserId = null) {
 
 async function fetchProfile(pool, profileId) {
   const { rows } = await pool.query(
-    `select id, leancloud_user_id, nickname, is_completed, gender, age, first_language, second_language, home_city
+    `select id, nickname, avatar_url, interests, communicable_languages,
+            is_completed, gender, age, first_language, second_language, home_city
      from profiles where id = $1 limit 1`,
     [profileId]
   );
@@ -73,6 +80,14 @@ export default async function profileRoutes(app) {
       if (!profile) {
         return error(reply, 'PROFILE_NOT_FOUND', 'Profile not found', 404);
       }
+      const resolvedAvatarUrl = resolveAvatarUrl(profile.avatar_url);
+      if (resolvedAvatarUrl !== (profile.avatar_url || '')) {
+        await pool.query(
+          'update profiles set avatar_url = $1 where id = $2',
+          [resolvedAvatarUrl, profileId]
+        );
+        profile.avatar_url = resolvedAvatarUrl;
+      }
       const completion = computeProfileCompletion(profile);
       if (profile.is_completed !== completion.isCompleted) {
         await pool.query(
@@ -80,11 +95,26 @@ export default async function profileRoutes(app) {
           [completion.isCompleted, profileId]
         );
       }
+      // Return complete profile data for Flutter to sync
       return ok(reply, {
         profileId,
         isCompleted: completion.isCompleted,
         missingFields: completion.missing,
         issuedJwt: auth.issuedJwt,
+        // Include profile data
+        profile: {
+          nickname: profile.nickname || '',
+          avatarUrl: resolveAvatarUrl(profile.avatar_url),
+          interests: Array.isArray(profile.interests) ? profile.interests : [],
+          communicableLanguages: Array.isArray(profile.communicable_languages)
+            ? profile.communicable_languages
+            : [profile.first_language, profile.second_language].filter(Boolean),
+          gender: profile.gender || '',
+          age: profile.age || null,
+          firstLanguage: profile.first_language || '',
+          secondLanguage: profile.second_language || '',
+          homeCity: profile.home_city || '',
+        },
       });
     } catch (err) {
       if (err?.statusCode) {
@@ -114,12 +144,13 @@ export default async function profileRoutes(app) {
         return error(reply, 'INVALID_REQUEST', 'payload is required', 400);
       }
 
+      const ownerProfileId = await ensureProfile(pool, auth.userId);
+      if (profileId !== ownerProfileId) {
+        return error(reply, 'FORBIDDEN', 'profileId does not belong to user', 403);
+      }
       const profile = await fetchProfile(pool, profileId);
       if (!profile) {
         return error(reply, 'PROFILE_NOT_FOUND', 'Profile not found', 404);
-      }
-      if (profile.leancloud_user_id !== auth.userId) {
-        return error(reply, 'FORBIDDEN', 'profileId does not belong to user', 403);
       }
 
       const updates = {};
@@ -161,6 +192,25 @@ export default async function profileRoutes(app) {
         const homeCity = normalizeText(payload.homeCity);
         if (!homeCity) invalidFields.push('homeCity');
         else updates.home_city = homeCity;
+      }
+      if (Object.prototype.hasOwnProperty.call(payload, 'avatarUrl')) {
+        updates.avatar_url = normalizeText(payload.avatarUrl);
+      }
+      if (Object.prototype.hasOwnProperty.call(payload, 'interests')) {
+        const interests = Array.isArray(payload.interests)
+          ? payload.interests
+              .map((val) => normalizeText(val))
+              .filter((val) => val)
+          : [];
+        updates.interests = interests;
+      }
+      if (Object.prototype.hasOwnProperty.call(payload, 'communicableLanguages')) {
+        const languages = Array.isArray(payload.communicableLanguages)
+          ? payload.communicableLanguages
+              .map((val) => normalizeText(val))
+              .filter((val) => val)
+          : [];
+        updates.communicable_languages = languages;
       }
 
       if (invalidFields.length > 0) {

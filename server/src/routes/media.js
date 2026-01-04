@@ -5,6 +5,7 @@ import {
   headObject,
   createReadUrl,
   buildFinalUrl,
+  setObjectAcl,
 } from '../services/storage/ossStorageService.js';
 import { createMediaAsset } from '../services/mediaAssetsService.js';
 import { logMediaAudit } from '../services/mediaAuditService.js';
@@ -316,6 +317,14 @@ export default async function mediaRoutes(app) {
       }
 
       const resolvedMime = contentType || payload.declaredMime;
+      if (parsed.visibility === 'public') {
+        try {
+          await setObjectAcl({ bucket, objectKey: payload.objectKey, acl: 'public-read' });
+        } catch (err) {
+          req.log.error(err);
+          fail('STORAGE_ERROR', 'Failed to set object ACL', 502);
+        }
+      }
       const publicUrl = buildFinalUrl({
         bucket,
         objectKey: payload.objectKey,

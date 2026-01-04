@@ -5,18 +5,18 @@ import { initPaymentsService } from '../services/payments/index.js';
 import { WebhookEventTypes } from '../services/payments/providerInterface.js';
 import { config } from '../config.js';
 
-function requireLeancloudUserId(leancloudUserId) {
-  if (!leancloudUserId || String(leancloudUserId).trim().length === 0) {
-    const err = new Error('leancloudUserId is required');
-    err.code = 'LEAN_USER_ID_REQUIRED';
+function requireUserId(userId) {
+  if (!userId || String(userId).trim().length === 0) {
+    const err = new Error('userId is required');
+    err.code = 'USER_ID_REQUIRED';
     err.statusCode = 400;
     throw err;
   }
-  return String(leancloudUserId).trim();
+  return String(userId).trim();
 }
 
-async function ensureProfile(pool, leancloudUserId) {
-  const validated = requireLeancloudUserId(leancloudUserId);
+async function ensureProfile(pool, userId) {
+  const validated = requireUserId(userId);
   const { rows } = await pool.query(
     'select ensure_profile_v2($1, $2) as id',
     [validated, null]
@@ -132,6 +132,24 @@ async function handleCreateIntent(pool, req, reply, actor, paymentsService) {
     return error(reply, 'PRICE_MISMATCH', 'Order amount mismatch', 409, { orderAmount });
   }
 
+  const { rows: activeIntents } = await pool.query(
+    `select * from payment_intents
+     where order_id = $1 and status in ('requires_confirmation', 'created')
+     order by created_at desc limit 1`,
+    [orderId]
+  );
+  if (activeIntents.length > 0) {
+    const intent = activeIntents[0];
+    return ok(reply, {
+      intentId: intent.id,
+      providerIntentId: intent.provider_intent_id,
+      status: intent.status,
+      amount: Number(intent.amount),
+      currency: intent.currency,
+      clientSecret: intent.client_secret,
+    });
+  }
+
   // Use the active provider
   const provider = paymentsService.getActiveProvider();
 
@@ -143,24 +161,40 @@ async function handleCreateIntent(pool, req, reply, actor, paymentsService) {
     metadata: { ...metadata, orderId, travelerId: profileId },
   });
 
-  // Persist intent
-  const { rows } = await pool.query(
-    `insert into payment_intents
-     (order_id, provider, provider_intent_id, amount, currency, status, idempotency_key, client_secret, metadata)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-     returning *`,
-    [
-      orderId,
-      provider.name,
-      result.providerIntentId,
-      requestedAmount,
-      currency,
-      result.status, // requires_confirmation
-      idempotencyKey,
-      result.clientSecret,
-      JSON.stringify(metadata),
-    ]
-  );
+  // Persist intent (fallback to existing if concurrent request wins)
+  let rows = [];
+  try {
+    const insert = await pool.query(
+      `insert into payment_intents
+       (order_id, provider, provider_intent_id, amount, currency, status, idempotency_key, client_secret, metadata)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       returning *`,
+      [
+        orderId,
+        provider.name,
+        result.providerIntentId,
+        requestedAmount,
+        currency,
+        result.status, // requires_confirmation
+        idempotencyKey,
+        result.clientSecret,
+        JSON.stringify(metadata),
+      ]
+    );
+    rows = insert.rows;
+  } catch (err) {
+    if (err?.code === '23505') {
+      const { rows: existing } = await pool.query(
+        `select * from payment_intents
+         where order_id = $1 and status in ('requires_confirmation', 'created')
+         order by created_at desc limit 1`,
+        [orderId]
+      );
+      rows = existing;
+    } else {
+      throw err;
+    }
+  }
 
   const intent = rows[0];
   await pool.query(
@@ -244,7 +278,32 @@ async function handleConfirm(pool, req, reply, actor, paymentsService) {
     ]
   );
 
-  if (!webhookOnly && (result.status === 'succeeded' || result.status === 'failed')) {
+  const mockDesiredStatus = provider.name === 'mock'
+    ? (simulate === 'failed' ? 'failed' : simulate === 'requires_action' ? 'requires_action' : 'succeeded')
+    : null;
+
+  if (mockDesiredStatus && mockDesiredStatus !== 'requires_action') {
+    const event = {
+      eventId: `sync_${intent.id}_${Date.now()}`,
+      type: mockDesiredStatus === 'succeeded'
+        ? WebhookEventTypes.PAYMENT_SUCCEEDED
+        : WebhookEventTypes.PAYMENT_FAILED,
+      provider: provider.name,
+      createdAt: new Date().toISOString(),
+      data: {
+        providerIntentId: intent.provider_intent_id,
+        providerTxnId: result.providerTxnId || null,
+        amount: intent.amount,
+        currency: intent.currency,
+        status: mockDesiredStatus,
+        ...(mockDesiredStatus === 'failed' && {
+          errorCode: result.errorCode || 'MOCK_DECLINED',
+          errorMessage: result.errorMessage || 'Payment failed',
+        }),
+      },
+    };
+    await processSyncEvent(pool, paymentsService, event, req.log);
+  } else if (!webhookOnly && (result.status === 'succeeded' || result.status === 'failed')) {
     const event = {
       eventId: `sync_${intent.id}_${Date.now()}`,
       type: result.status === 'succeeded'
@@ -268,9 +327,11 @@ async function handleConfirm(pool, req, reply, actor, paymentsService) {
   }
 
   // Update intent status to match provider's immediate response (usually processing)
-  const normalizedStatus = webhookOnly && (result.status === 'succeeded' || result.status === 'failed')
-    ? 'processing'
-    : result.status;
+  const normalizedStatus = mockDesiredStatus && mockDesiredStatus !== 'requires_action'
+    ? mockDesiredStatus
+    : webhookOnly && (result.status === 'succeeded' || result.status === 'failed')
+      ? 'processing'
+      : result.status;
   await pool.query(
     'update payment_intents set status=$1, updated_at=now() where id=$2',
     [normalizedStatus, intent.id]

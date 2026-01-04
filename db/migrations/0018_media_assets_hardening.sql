@@ -4,23 +4,49 @@ ALTER TABLE media_assets
   ADD COLUMN IF NOT EXISTS size_bytes bigint,
   ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'active';
 
-ALTER TABLE media_assets
-  ADD CONSTRAINT IF NOT EXISTS media_assets_scope_check
-    CHECK (scope IN ('post', 'experience', 'avatar', 'kyc')) NOT VALID,
-  ADD CONSTRAINT IF NOT EXISTS media_assets_visibility_check
-    CHECK (visibility IN ('public', 'private')) NOT VALID,
-  ADD CONSTRAINT IF NOT EXISTS media_assets_status_check
-    CHECK (status IN ('active', 'rejected')) NOT VALID,
-  ADD CONSTRAINT IF NOT EXISTS media_assets_object_key_present
-    CHECK (object_key IS NOT NULL) NOT VALID,
-  ADD CONSTRAINT IF NOT EXISTS media_assets_owner_present
-    CHECK (owner_user_id IS NOT NULL) NOT VALID,
-  ADD CONSTRAINT IF NOT EXISTS media_assets_ext_present
-    CHECK (ext IS NOT NULL) NOT VALID,
-  ADD CONSTRAINT IF NOT EXISTS media_assets_mime_present
-    CHECK (mime IS NOT NULL) NOT VALID,
-  ADD CONSTRAINT IF NOT EXISTS media_assets_size_bytes_present
-    CHECK (size_bytes IS NOT NULL) NOT VALID;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'media_assets_scope_check') THEN
+    ALTER TABLE media_assets
+      ADD CONSTRAINT media_assets_scope_check
+      CHECK (scope IN ('post', 'experience', 'avatar', 'kyc')) NOT VALID;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'media_assets_visibility_check') THEN
+    ALTER TABLE media_assets
+      ADD CONSTRAINT media_assets_visibility_check
+      CHECK (visibility IN ('public', 'private')) NOT VALID;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'media_assets_status_check') THEN
+    ALTER TABLE media_assets
+      ADD CONSTRAINT media_assets_status_check
+      CHECK (status IN ('active', 'rejected')) NOT VALID;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'media_assets_object_key_present') THEN
+    ALTER TABLE media_assets
+      ADD CONSTRAINT media_assets_object_key_present
+      CHECK (object_key IS NOT NULL) NOT VALID;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'media_assets_owner_present') THEN
+    ALTER TABLE media_assets
+      ADD CONSTRAINT media_assets_owner_present
+      CHECK (owner_user_id IS NOT NULL) NOT VALID;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'media_assets_ext_present') THEN
+    ALTER TABLE media_assets
+      ADD CONSTRAINT media_assets_ext_present
+      CHECK (ext IS NOT NULL) NOT VALID;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'media_assets_mime_present') THEN
+    ALTER TABLE media_assets
+      ADD CONSTRAINT media_assets_mime_present
+      CHECK (mime IS NOT NULL) NOT VALID;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'media_assets_size_bytes_present') THEN
+    ALTER TABLE media_assets
+      ADD CONSTRAINT media_assets_size_bytes_present
+      CHECK (size_bytes IS NOT NULL) NOT VALID;
+  END IF;
+END $$;
 
 CREATE UNIQUE INDEX IF NOT EXISTS media_assets_object_key_unique
   ON media_assets (object_key);

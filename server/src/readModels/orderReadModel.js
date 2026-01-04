@@ -18,10 +18,10 @@ function maskId(value) {
   return `user_${text.slice(-4)}`;
 }
 
-function pickName({ explicit, nickname, leanId, profileId }) {
+function pickName({ explicit, nickname, userId, profileId }) {
   if (explicit && String(explicit).trim()) return String(explicit).trim();
   if (nickname && String(nickname).trim()) return String(nickname).trim();
-  if (leanId && String(leanId).trim()) return maskId(leanId);
+  if (userId && String(userId).trim()) return maskId(userId);
   if (profileId && String(profileId).trim()) return maskId(profileId);
   return '';
 }
@@ -52,14 +52,14 @@ export function toOrderReadModel(row) {
     traveler_name: pickName({
       explicit: row.traveler_name,
       nickname: row.traveler_nickname,
-      leanId: row.travelerLeancloudUserId,
+      userId: row.travelerUserId,
       profileId: row.traveler_id,
     }),
     traveler_avatar: row.traveler_avatar ?? '',
     host_name: pickName({
       explicit: row.host_name,
       nickname: row.host_nickname,
-      leanId: row.hostLeancloudUserId,
+      userId: row.hostUserId,
       profileId: row.host_id,
     }),
     host_avatar: row.host_avatar ?? '',
@@ -88,7 +88,7 @@ export function toOrderReadModel(row) {
     refund_status: row.refund_status ?? null,
     refund_id: row.refund_id ?? null,
     refund_at: toIso(row.refund_at),
-    hostLeancloudUserId: row.hostLeancloudUserId ?? null,
-    travelerLeancloudUserId: row.travelerLeancloudUserId ?? null,
+    hostUserId: row.hostUserId ?? null,
+    travelerUserId: row.travelerUserId ?? null,
   };
 }

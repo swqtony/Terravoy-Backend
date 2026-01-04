@@ -6,6 +6,8 @@ import registerRoutes from './routes/index.js';
 import { startJobs } from './jobs/index.js';
 import cors from '@fastify/cors';
 import { checkDbCapabilities } from './services/capability.js';
+import { verifyAccessToken } from './plugins/authBearer.js';
+import jwt from 'jsonwebtoken';
 
 const logger = pino({ transport: { target: 'pino-pretty' } });
 const app = Fastify({
@@ -57,10 +59,24 @@ app.log.info(
 
 // Log actor per request
 app.addHook('preHandler', async (req, _reply) => {
-  const actor =
-    req.headers['x-leancloud-user-id'] ||
-    req.headers['x-leancloud-userid'] ||
-    'anonymous';
+  let actor = 'anonymous';
+  const auth = req.headers.authorization || req.headers.Authorization;
+  if (auth) {
+    const [scheme, token] = auth.split(' ');
+    if (token && scheme.toLowerCase() === 'bearer') {
+      const access = verifyAccessToken(token);
+      if (access?.sub) {
+        actor = access.sub;
+      } else {
+        try {
+          const decoded = jwt.verify(token, config.auth.localJwtSecret);
+          actor = decoded?.sub || actor;
+        } catch (_err) {
+          // keep anonymous on invalid token
+        }
+      }
+    }
+  }
   req.log = req.log.child({ actor, path: req.url, method: req.method, reqId: req.id });
 });
 

@@ -102,9 +102,7 @@ export function createUploadUrl({ userId, scope, visibility, mime, ext, size }) 
   const uploadUrl = client.signatureUrl(objectKey, {
     method: 'PUT',
     expires: expiresIn,
-    headers: {
-      'Content-Type': mime || 'application/octet-stream',
-    },
+    'Content-Type': mime || 'application/octet-stream',
   });
 
   const finalUrl = visibility === 'public'
@@ -149,4 +147,10 @@ export function validateComplete({ scope, visibility, mime, size, ext }) {
   ensureValidVisibility(visibility);
   if (ext) ensureValidExt(ext);
   if (size) ensureSizeLimit(size, mime);
+}
+
+export async function setObjectAcl({ bucket, objectKey, acl }) {
+  ensureEnabled();
+  const client = buildClient(bucket);
+  await client.putACL(objectKey, acl);
 }
