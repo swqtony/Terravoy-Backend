@@ -17,9 +17,13 @@ const app = Fastify({
 // Decorate with db
 app.decorate('pg', { pool });
 
-// CORS for future frontend switch
+// CORS for frontend/admin; restrict via CORS_ORIGINS when set
+const corsOrigins = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 await app.register(cors, {
-  origin: true,
+  origin: corsOrigins.length > 0 ? corsOrigins : true,
 });
 
 app.log.info({
