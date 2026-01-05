@@ -22,6 +22,14 @@ const corsOrigins = (process.env.CORS_ORIGINS || '')
   .split(',')
   .map((origin) => origin.trim())
   .filter(Boolean);
+const isProdLike =
+  (process.env.NODE_ENV || '').toLowerCase() === 'production' ||
+  (process.env.NODE_ENV || '').toLowerCase() === 'staging';
+if (isProdLike && corsOrigins.length === 0) {
+  throw new Error(
+    'CORS_ORIGINS must be set in production/staging (comma-separated list).'
+  );
+}
 await app.register(cors, {
   origin: corsOrigins.length > 0 ? corsOrigins : true,
 });
