@@ -23,12 +23,6 @@ await app.register(cors, {
 });
 
 app.log.info({
-  event: 'leancloud.config.loaded',
-  server: config.lean.server || '[unset]',
-  appIdPrefix: (config.lean.appId || '').slice(0, 8),
-}, 'LeanCloud config loaded');
-
-app.log.info({
   event: 'oss.config.loaded',
   endpoint: config.oss.endpoint || '',
   bucketPublic: config.oss.bucketPublic || '',

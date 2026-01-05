@@ -68,12 +68,6 @@ const config = {
     smsProviderTemplateRegister:
       process.env.AUTH_SMS_PROVIDER_TEMPLATE_REGISTER || '',
   },
-  lean: {
-    appId: process.env.LEAN_APP_ID || '',
-    appKey: process.env.LEAN_APP_KEY || '',
-    server: process.env.LEAN_SERVER || '',
-    masterKey: process.env.LEAN_MASTER_KEY || '',
-  },
   oss: {
     useOssUploader: process.env.USE_OSS_UPLOADER !== '0',
     endpoint: process.env.OSS_ENDPOINT || '',
