@@ -17,9 +17,25 @@ import hostCertificationsRoutes from './hostCertifications.js';
 import kycRoutes from './kyc.js';
 import geoRoutes from './geo.js';
 import userRoutes from './user.js';
+import adminAuthRoutes from './adminAuth.js';
+import adminReportsRoutes from './adminReports.js';
+import adminMediaRoutes from './adminMedia.js';
+import adminAuditLogsRoutes from './adminAuditLogs.js';
+import adminPostsRoutes from './adminPosts.js';
+import adminExperiencesRoutes from './adminExperiences.js';
+import adminOrdersRoutes from './adminOrders.js';
 import { config } from '../config.js';
 
 export default function registerRoutes(app, prefix = '') {
+  if (!prefix) {
+    app.register(adminAuthRoutes);
+    app.register(adminReportsRoutes);
+    app.register(adminMediaRoutes);
+    app.register(adminAuditLogsRoutes);
+    app.register(adminPostsRoutes);
+    app.register(adminExperiencesRoutes);
+    app.register(adminOrdersRoutes);
+  }
   app.register(healthRoutes, { prefix });
   app.register(authRoutes, { prefix });
   app.register(authSmsRoutes, { prefix });

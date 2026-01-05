@@ -3,7 +3,6 @@ import { requireAuth, respondAuthError } from '../services/authService.js';
 import {
   createUploadUrl,
   headObject,
-  createReadUrl,
   buildFinalUrl,
   setObjectAcl,
 } from '../services/storage/ossStorageService.js';
@@ -378,57 +377,7 @@ export default async function mediaRoutes(app) {
     }
   };
 
-  const adminReadHandler = async (req, reply) => {
-    const auth = await ensureAuth(req, reply);
-    if (!auth) return;
-    const adminKey = normalizeString(req.headers['x-admin-key']);
-    const allowAdminByToken = auth.tokenType === 'terra' && auth.role === 'admin';
-    const allowAdminByKey = config.media.adminReadKey && adminKey === config.media.adminReadKey;
-    if (!allowAdminByToken && !allowAdminByKey) {
-      return error(reply, 'FORBIDDEN', 'Admin role required', 403);
-    }
-    const objectKey = normalizeString(req.body?.objectKey);
-    if (!objectKey) {
-      return error(reply, 'INVALID_REQUEST', 'objectKey is required', 400);
-    }
-    try {
-      const parsed = parseObjectKey(objectKey);
-      if (parsed.visibility !== 'private') {
-        fail('INVALID_VISIBILITY', 'Only private assets are allowed');
-      }
-      const bucket = config.oss.bucketPrivate;
-      if (!bucket) {
-        fail('MISCONFIG', 'OSS bucket missing', 500);
-      }
-      const expiresIn = 120;
-      const url = createReadUrl({ bucket, objectKey, expiresIn });
-      const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
-      await logMediaAudit({
-        pool,
-        userId: auth.userId,
-        ip: getClientIp(req),
-        action: 'admin_read_url',
-        objectKey,
-      });
-      return ok(reply, { url, expiresAt });
-    } catch (err) {
-      if (err?.statusCode) {
-        await logMediaAudit({
-          pool,
-          userId: auth.userId,
-          ip: getClientIp(req),
-          action: 'admin_read_url',
-          objectKey,
-          reason: err.message,
-        });
-        return error(reply, err.code || 'INVALID_REQUEST', err.message, err.statusCode, err.detail);
-      }
-      req.log.error(err);
-      return error(reply, 'SERVER_ERROR', 'Failed to create read URL', 500);
-    }
-  };
 
   app.post('/v1/media/upload-url', uploadHandler);
   app.post('/v1/media/complete', completeHandler);
-  app.post('/v1/admin/media/read-url', adminReadHandler);
 }

@@ -99,6 +99,17 @@ const config = {
   admin: {
     apiKey: process.env.ADMIN_API_KEY || '',
   },
+  adminAuth: {
+    jwtSecret: process.env.ADMIN_JWT_SECRET || '',
+    accessTtlMin: Number(process.env.ADMIN_ACCESS_TOKEN_TTL_MIN) || 30,
+    refreshTtlDays: Number(process.env.ADMIN_REFRESH_TOKEN_TTL_DAYS) || 30,
+    cookieName: process.env.ADMIN_COOKIE_NAME || 'admin_refresh_token',
+    cookieSecure:
+      (process.env.ADMIN_COOKIE_SECURE || '').toLowerCase() === 'true' ||
+      (process.env.ADMIN_COOKIE_SECURE === undefined &&
+        process.env.NODE_ENV === 'production'),
+    cookieSameSite: process.env.ADMIN_COOKIE_SAMESITE || 'lax',
+  },
   flags: {
     devAuthBypass: process.env.DEV_AUTH_BYPASS === '1',
     paymentsWebhookOnly: process.env.PAYMENTS_WEBHOOK_ONLY !== '0',
@@ -114,6 +125,10 @@ if (
   throw new Error(
     'AUTH_SMS_MODE must be "gateway" when NODE_ENV=production.'
   );
+}
+
+if (process.env.NODE_ENV === 'production' && !config.adminAuth.jwtSecret) {
+  throw new Error('ADMIN_JWT_SECRET must be set when NODE_ENV=production.');
 }
 
 export { config };
