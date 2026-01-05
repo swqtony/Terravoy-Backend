@@ -24,6 +24,9 @@ import adminAuditLogsRoutes from './adminAuditLogs.js';
 import adminPostsRoutes from './adminPosts.js';
 import adminExperiencesRoutes from './adminExperiences.js';
 import adminOrdersRoutes from './adminOrders.js';
+import adminHostCertificationsRoutes from './adminHostCertifications.js';
+import adminUsersRoutes from './adminUsers.js';
+import adminAdminUsersRoutes from './adminAdminUsers.js';
 import { config } from '../config.js';
 
 export default function registerRoutes(app, prefix = '') {
@@ -35,6 +38,9 @@ export default function registerRoutes(app, prefix = '') {
     app.register(adminPostsRoutes);
     app.register(adminExperiencesRoutes);
     app.register(adminOrdersRoutes);
+    app.register(adminHostCertificationsRoutes);
+    app.register(adminUsersRoutes);
+    app.register(adminAdminUsersRoutes);
   }
   app.register(healthRoutes, { prefix });
   app.register(authRoutes, { prefix });
