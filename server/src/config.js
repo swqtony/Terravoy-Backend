@@ -112,6 +112,33 @@ const config = {
   },
 };
 
+const isProdLike =
+  (process.env.NODE_ENV || '').toLowerCase() === 'production' ||
+  (process.env.NODE_ENV || '').toLowerCase() === 'staging';
+if (isProdLike) {
+  const required = [
+    'PORT',
+    'POSTGRES_HOST',
+    'POSTGRES_DB',
+    'POSTGRES_USER',
+    'POSTGRES_PASSWORD',
+    'REDIS_URL',
+    'PUBLIC_MEDIA_BASE_URL',
+    'IM_API_BASE_URL',
+    'AUTH_JWT_SECRET',
+    'ADMIN_JWT_SECRET',
+    'CORS_ORIGINS',
+  ];
+  const missing = required.filter(
+    (key) => !(process.env[key] && String(process.env[key]).trim())
+  );
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing required env for ${process.env.NODE_ENV}: ${missing.join(', ')}`
+    );
+  }
+}
+
 if (
   process.env.NODE_ENV === 'production' &&
   config.auth.smsMode !== 'gateway'

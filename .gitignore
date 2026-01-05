@@ -17,6 +17,7 @@ logs/
 .env.*
 !.env.example
 !.env.staging.example
+!.env.production.example
 
 # Build/test artifacts
 dist/
