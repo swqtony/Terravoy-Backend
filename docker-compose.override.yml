@@ -1,0 +1,7 @@
+services:
+  api:
+    environment:
+      ADMIN_JWT_SECRET: ${ADMIN_JWT_SECRET:-dev_admin_secret}
+  worker:
+    environment:
+      ADMIN_JWT_SECRET: ${ADMIN_JWT_SECRET:-dev_admin_secret}
