@@ -3,11 +3,10 @@
 ## 请求认证流程
 1) **首选 Bearer JWT**  
    - Header: `Authorization: Bearer <token>`  
-   - Token 内容：`sub`=LeanCloud userId，`role`=`traveler|host`，短期有效（默认 10 分钟，配置 `LOCAL_JWT_TTL_MIN`），签名密钥 `LOCAL_JWT_SECRET`。
-2) **备选 LeanCloud SessionToken**  
-   - Header: `X-LeanCloud-UserId` + `X-LeanCloud-SessionToken`（或 `X-LC-Session`）。  
-   - 服务端调用 LeanCloud REST `/1.1/users/me` 校验。  
-   - 校验通过后当前请求放行，并在响应头返回 `X-Local-JWT`（短期 JWT）。建议后续请求改用 Bearer JWT。
+   - Token 内容：`sub`=userId，`role`=`traveler|host`，短期有效（默认 10 分钟，配置 `LOCAL_JWT_TTL_MIN`），签名密钥 `LOCAL_JWT_SECRET`。
+2) **备选 Terra Token**  
+   - Header: `x-terra-token`  
+   - 服务端验证后签发短期 Bearer JWT（`X-Local-JWT`），建议后续请求改用 Bearer。
 3) 缺少以上有效凭证 -> `401 Unauthorized`。
 
 ## 授权模型
@@ -26,7 +25,6 @@
 ## 配置
 - `.env` 关键变量：
   - `LOCAL_JWT_SECRET`, `LOCAL_JWT_TTL_MIN`（短期 JWT）
-  - `LEAN_APP_ID`, `LEAN_APP_KEY`, `LEAN_SERVER`（SessionToken 校验）
   - 其余 DB/端口/terra dev token 见 `.env.example`
 
 ## 日志
@@ -34,4 +32,4 @@
 
 ## 与前端兼容
 - 请求格式保持 Supabase Edge Function 风格（未改路径/字段）。  
-- 如果前端暂未携带 Bearer，可继续用 `X-LeanCloud-UserId` + `X-LeanCloud-SessionToken`，服务端会返回 `X-Local-JWT`，建议前端后续改用 Bearer。
+- 若暂未携带 Bearer，可用 `x-terra-token` 换取 `X-Local-JWT`，建议后续改用 Bearer。

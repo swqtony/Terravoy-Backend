@@ -6,7 +6,6 @@
 - `server/src/services/authService.js:54-115` — `requireAuth` 支持：
   - `x-terra-token`（terra token）
   - `Authorization: Bearer <accessToken>`（自建 access token）
-  - LeanCloud headers（x-leancloud-user-id + sessionToken）
 
 ## 角色与归属校验（事实）
 
@@ -33,4 +32,3 @@
   - `handleAccept` / `handleReject` / `handleCancel` 等依赖 authorize（上文）
 - 状态迁移限制：
   - 只能按 PENDING/PENDING_PAYMENT → CONFIRMED → IN_SERVICE → COMPLETED 走（`orders.js:196-343` 相关 handler 内部校验）
-

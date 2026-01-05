@@ -41,7 +41,7 @@
 | channel | 无 | 缺失 | App 使用固定 `channel='backend'`，但后端无字段 |
 | tags | 无 | 缺失 | App 期望列表字段，后端无对应字段 |
 | timeline | 无 | 缺失 | App 用于状态时间线渲染（`booking_page.dart:367-409`） |
-| visibleToTraveler / visibleToHost | 无 | 缺失 | LeanCloud 用于过滤；后端当前未提供 |
+| visibleToTraveler / visibleToHost | 无 | 缺失 | 旧方案用于过滤；后端当前未提供 |
 | timeSlotLabel | 无 | 缺失 | 后端无字段 |
 | notes | `orders.traveler_note` | 有 | App 映射 `traveler_note`（`order_service_backend.dart:207`） |
 | contactPhone | 无 | 缺失 | 后端订单无字段 |
@@ -49,4 +49,3 @@
 | travelerVerified / travelerVerifiedLevel | 无 | 缺失 | App 期望字段；后端无 |
 | hostCertificationStatus / hostCertificationBadge | 无 | 缺失 | App 期望字段；后端无 |
 | pricePerGuest | 无 | 缺失 | 后端无字段；App 置空 |
-
