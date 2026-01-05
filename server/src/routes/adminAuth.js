@@ -11,6 +11,7 @@ import {
   verifyPassword,
 } from '../services/adminAuthService.js';
 import { requireAdminAuth } from '../middlewares/adminAuth.js';
+import { loadAdminPermissions } from '../services/adminRbacService.js';
 
 function parseCookies(header) {
   const cookies = {};
@@ -140,7 +141,13 @@ export default async function adminAuthRoutes(app) {
     if (!admin) {
       return reply.code(401).send({ success: false, code: 'UNAUTHORIZED', message: 'Invalid admin token' });
     }
-
-    return reply.send({ id: admin.id, email: admin.email, status: admin.status });
+    const { permissions, isSuperAdmin } = await loadAdminPermissions(pool, admin.id);
+    return reply.send({
+      id: admin.id,
+      email: admin.email,
+      status: admin.status,
+      permissions: Array.from(permissions),
+      isSuperAdmin,
+    });
   });
 }
