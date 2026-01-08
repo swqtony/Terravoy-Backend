@@ -115,7 +115,7 @@ function normalizeCityScope(val) {
 async function fetchUserIdByProfileId(pool, profileId) {
   if (!profileId) return null;
   const { rows } = await pool.query(
-    `select user_id
+    `select id as user_id
      from profiles
      where id = $1
      limit 1`,
@@ -128,7 +128,7 @@ async function fetchUserIdMap(pool, profileIds) {
   const ids = (profileIds || []).filter(Boolean);
   if (ids.length === 0) return new Map();
   const { rows } = await pool.query(
-    `select id, user_id
+    `select id, id as user_id
      from profiles
      where id = any($1::uuid[])`,
     [ids]
@@ -436,14 +436,14 @@ export default async function matchRoutes(app) {
             },
             sessionRow: sessionRow
               ? {
-                  id: sessionRow.id,
-                  request_a_id: sessionRow.request_a_id,
-                  request_b_id: sessionRow.request_b_id,
-                  profile_a_id: sessionRow.profile_a_id,
-                  profile_b_id: sessionRow.profile_b_id,
-                  thread_id: sessionRow.thread_id,
-                  status: sessionRow.status,
-                }
+                id: sessionRow.id,
+                request_a_id: sessionRow.request_a_id,
+                request_b_id: sessionRow.request_b_id,
+                profile_a_id: sessionRow.profile_a_id,
+                profile_b_id: sessionRow.profile_b_id,
+                thread_id: sessionRow.thread_id,
+                status: sessionRow.status,
+              }
               : null,
             invalidReason,
           }, 'match-start invalid_or_self_match context');
@@ -456,40 +456,40 @@ export default async function matchRoutes(app) {
             }, 'match-start downgrade to waiting');
           }
         } else {
-        if (data.status === 'profile_incomplete') {
-          return ok(reply, {
-            ...data,
-            issuedJwt: auth.issuedJwt,
-          });
-        }
-        const response = {
-          ...data,
-          preferences: effectivePrefs,
-          appliedPreferences,
-          issuedJwt: auth.issuedJwt,
-        };
-        const missing = listMissingFields(response);
-        if (
-          missing.length === 0 &&
-          isSessionForRequest(sessionRow, response.matchRequestId)
-        ) {
-          if (process.env.NODE_ENV !== 'production') {
-            req.log.debug({ event: 'match-start.response', response }, 'match-start response');
+          if (data.status === 'profile_incomplete') {
+            return ok(reply, {
+              ...data,
+              issuedJwt: auth.issuedJwt,
+            });
           }
-          return ok(reply, response);
-        }
-        if (process.env.NODE_ENV !== 'production') {
-          req.log.warn({
-            event: 'match-start.downgrade_waiting',
-            reason: 'incomplete_match_fields_or_mismatched_request',
-            missing,
-            requestId: response.matchRequestId,
-            sessionId: sessionRow.id,
-            requestA: sessionRow.request_a_id,
-            requestB: sessionRow.request_b_id,
-            threadId: sessionRow.thread_id,
-          }, 'match-start downgrade to waiting');
-        }
+          const response = {
+            ...data,
+            preferences: effectivePrefs,
+            appliedPreferences,
+            issuedJwt: auth.issuedJwt,
+          };
+          const missing = listMissingFields(response);
+          if (
+            missing.length === 0 &&
+            isSessionForRequest(sessionRow, response.matchRequestId)
+          ) {
+            if (process.env.NODE_ENV !== 'production') {
+              req.log.debug({ event: 'match-start.response', response }, 'match-start response');
+            }
+            return ok(reply, response);
+          }
+          if (process.env.NODE_ENV !== 'production') {
+            req.log.warn({
+              event: 'match-start.downgrade_waiting',
+              reason: 'incomplete_match_fields_or_mismatched_request',
+              missing,
+              requestId: response.matchRequestId,
+              sessionId: sessionRow.id,
+              requestA: sessionRow.request_a_id,
+              requestB: sessionRow.request_b_id,
+              threadId: sessionRow.thread_id,
+            }, 'match-start downgrade to waiting');
+          }
         }
       }
       const activeReq = await getActiveRequest(pool, profileId);
@@ -865,7 +865,7 @@ export default async function matchRoutes(app) {
     const { sessionId, selfProfileId = null } = req.body || {};
     if (!sessionId) return error(reply, 'INVALID_REQUEST', 'sessionId required', 400);
     try {
-    const { rows } = await pool.query(
+      const { rows } = await pool.query(
         'select id, profile_a_id, profile_b_id, request_a_id, request_b_id, thread_id from match_sessions where id = $1 limit 1',
         [sessionId]
       );

@@ -213,12 +213,6 @@ func setupOSSLifecycle(cfg Config) {
 		return
 	}
 
-	bucket, err := client.Bucket(cfg.OSSBucketIM)
-	if err != nil {
-		log.Error().Err(err).Msg("OSS lifecycle: failed to get bucket")
-		return
-	}
-
 	// 定义生命周期规则：im/ 前缀下的文件在 N 天后过期删除
 	ruleID := "im-message-media-expire"
 	rules := []oss.LifecycleRule{
@@ -232,7 +226,8 @@ func setupOSSLifecycle(cfg Config) {
 		},
 	}
 
-	err = bucket.SetBucketLifecycle(rules)
+	// SetBucketLifecycle 是 Client 的方法，不是 Bucket 的方法
+	err = client.SetBucketLifecycle(cfg.OSSBucketIM, rules)
 	if err != nil {
 		log.Error().Err(err).Int("days", cfg.OSSIMRetentionDays).Msg("OSS lifecycle: failed to set rule")
 		return

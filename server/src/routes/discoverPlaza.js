@@ -2,6 +2,7 @@ import { ok, error, contentBlocked } from '../utils/responses.js';
 import { requireAuth, respondAuthError } from '../services/authService.js';
 import { checkText } from '../services/contentSafetyService.js';
 import { logBlockedContent, buildTextPreview } from '../services/safetyAuditLogger.js';
+import { signUrlsFromStoredUrls, signUrlFromStoredUrl } from '../services/storage/ossStorageService.js';
 
 function normalizeInt(value, fallback) {
   const parsed = Number.parseInt(value, 10);
@@ -45,10 +46,12 @@ function mapPost(row) {
     id: row.id,
     authorId: row.author_id ?? '',
     authorName: row.author_name ?? '',
-    authorAvatarUrl: row.author_avatar_url ?? '',
+    // Convert stored avatar URL to signed URL
+    authorAvatarUrl: signUrlFromStoredUrl(row.author_avatar_url ?? ''),
     city: row.city ?? '',
     content: row.content ?? '',
-    imageUrls: asStringArray(row.images),
+    // Convert stored image URLs to signed URLs (1 hour expiry)
+    imageUrls: signUrlsFromStoredUrls(asStringArray(row.images), 3600),
     likes: row.like_count ?? 0,
     comments: row.comment_count ?? 0,
     publishedAt: toIso(row.created_at) ?? new Date().toISOString(),

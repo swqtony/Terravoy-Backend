@@ -118,3 +118,9 @@ services:
 
 volumes:
   terravoy_im_pg:
+
+# 使用主后端的网络，确保容器间可以通过 DNS 直接通信
+networks:
+  default:
+    name: terravoy-backend_default
+    external: true

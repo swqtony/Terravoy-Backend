@@ -46,6 +46,19 @@ func KeyRateThread(threadID string) string {
 	return keyRateThreadPrefix + threadID
 }
 
+const keyFanoutPrefix = "im:fanout:"
+
+// KeyFanout returns the Redis Pub/Sub channel for cross-gateway message fanout
+func KeyFanout(threadID string) string {
+	return keyFanoutPrefix + threadID
+}
+
+// FanoutPattern returns the pattern for subscribing to all fanout channels
+func FanoutPattern() string {
+	return keyFanoutPrefix + "*"
+}
+
+
 func AllowRate(ctx context.Context, client *redis.Client, key string, windowMs int, max int) (bool, int64, error) {
 	if client == nil {
 		return true, 0, nil

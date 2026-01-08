@@ -181,6 +181,11 @@ func main() {
 	hub := newHub()
 	httpClient := &http.Client{Timeout: 8 * time.Second}
 
+	// Start Redis Pub/Sub fanout subscriber for cross-gateway message delivery
+	if redisClient != nil {
+		go startFanoutSubscriber(hub, redisClient, cfg.GatewayID)
+	}
+
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
@@ -194,6 +199,39 @@ func main() {
 	log.Info().Str("addr", cfg.Addr).Msg("im-gateway listening")
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal().Err(err).Msg("gateway crashed")
+	}
+}
+
+// startFanoutSubscriber subscribes to Redis Pub/Sub channels for cross-gateway message fanout
+func startFanoutSubscriber(hub *Hub, rdb *redis.Client, selfGatewayID string) {
+	for {
+		pubsub := rdb.PSubscribe(context.Background(), redisx.FanoutPattern())
+		ch := pubsub.Channel()
+		log.Info().Str("gateway_id", selfGatewayID).Msg("fanout subscriber started")
+		for msg := range ch {
+			// Extract threadID from channel name: "im:fanout:{threadID}"
+			threadID := strings.TrimPrefix(msg.Channel, "im:fanout:")
+			if threadID == "" {
+				continue
+			}
+			// Parse payload to check origin gateway
+			var wrapper struct {
+				Payload struct {
+					OriginGW string `json:"_origin_gw"`
+				} `json:"payload"`
+			}
+			if err := json.Unmarshal([]byte(msg.Payload), &wrapper); err == nil {
+				if wrapper.Payload.OriginGW == selfGatewayID {
+					// Skip messages originating from this gateway instance
+					continue
+				}
+			}
+			hub.broadcast(threadID, []byte(msg.Payload))
+		}
+		// Channel closed, reconnect after delay
+		_ = pubsub.Close()
+		log.Warn().Msg("fanout subscriber disconnected, reconnecting...")
+		time.Sleep(time.Second)
 	}
 }
 
@@ -368,15 +406,16 @@ func readLoop(c *Conn, cfg Config, hub *Hub, rdb *redis.Client, httpClient *http
 				"seq":           resp.Seq,
 			})
 			out := map[string]any{
-				"thread_id":  msg.ThreadID,
-				"msg_id":     resp.MsgID,
-				"seq":        resp.Seq,
-				"created_at": resp.CreatedAt,
-				"sender_id":  c.userID,
-				"msg_type":   msg.MsgType,
-				"content":    json.RawMessage(msg.Content),
+				"thread_id":     msg.ThreadID,
+				"msg_id":        resp.MsgID,
+				"seq":           resp.Seq,
+				"created_at":    resp.CreatedAt,
+				"sender_id":     c.userID,
+				"msg_type":      msg.MsgType,
+				"content":       json.RawMessage(msg.Content),
+				"client_msg_id": msg.ClientMsgID,
 			}
-			broadcast(hub, msg.ThreadID, c.traceID, out)
+			broadcast(hub, msg.ThreadID, c.traceID, out, rdb, cfg.GatewayID)
 		case "read":
 			if c.userID == "" {
 				sendError(c, "UNAUTHORIZED", "auth required")
@@ -439,14 +478,28 @@ func sendJSON(c *Conn, msg outboundMsg) {
 	}
 }
 
-func broadcast(hub *Hub, threadID, trace string, payload map[string]any) {
+func broadcast(hub *Hub, threadID, trace string, payload map[string]any, rdb *redis.Client, originGatewayID string) {
+	// Add origin gateway marker for self-echo filtering
+	payload["_origin_gw"] = originGatewayID
 	msg := outboundMsg{
 		Type:    "msg",
 		TraceID: trace,
 		Payload: payload,
 	}
 	data, _ := json.Marshal(msg)
-	hub.broadcast(threadID, data)
+	// Publish to Redis for cross-gateway fanout
+	if rdb != nil {
+		channelKey := redisx.KeyFanout(threadID)
+		if err := rdb.Publish(context.Background(), channelKey, string(data)).Err(); err != nil {
+			log.Warn().Err(err).Str("thread_id", threadID).Msg("fanout publish failed, falling back to local broadcast")
+		}
+		// Always broadcast locally for same-instance subscribers
+		// Subscriber's self-origin filter prevents duplicate from Redis echo
+		hub.broadcast(threadID, data)
+	} else {
+		// No Redis, local broadcast only
+		hub.broadcast(threadID, data)
+	}
 }
 
 func extractBearer(raw string) string {

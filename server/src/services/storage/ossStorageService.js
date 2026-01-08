@@ -154,3 +154,82 @@ export async function setObjectAcl({ bucket, objectKey, acl }) {
   const client = buildClient(bucket);
   await client.putACL(objectKey, acl);
 }
+
+// =============================================================================
+// Signed URL Generation from Stored URLs
+// =============================================================================
+
+/**
+ * Extract object key from a stored full OSS URL.
+ * Example: "https://bucket.oss-cn-beijing.aliyuncs.com/public/post/..." -> "public/post/..."
+ */
+function extractObjectKeyFromUrl(url) {
+  if (!url || typeof url !== 'string') return null;
+  try {
+    const parsed = new URL(url);
+    // Object key is the path without leading slash
+    return parsed.pathname.replace(/^\//, '');
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Detect bucket name from stored URL.
+ * Example: "https://terravoy-public.oss-cn-beijing.aliyuncs.com/..." -> "terravoy-public"
+ */
+function detectBucketFromUrl(url) {
+  if (!url || typeof url !== 'string') return null;
+  try {
+    const parsed = new URL(url);
+    // Bucket is the first part of hostname before ".oss-"
+    const match = parsed.hostname.match(/^([^.]+)\.oss-/);
+    return match ? match[1] : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Convert a stored full OSS URL to a signed URL.
+ * If OSS is disabled or URL is not an OSS URL, returns original URL.
+ * 
+ * @param {string} url - The stored full URL
+ * @param {number} expiresIn - Expiry in seconds (default: 3600 = 1 hour)
+ * @returns {string} - Signed URL or original URL if conversion fails
+ */
+export function signUrlFromStoredUrl(url, expiresIn = 3600) {
+  if (!url || typeof url !== 'string') return url;
+
+  // Skip non-OSS URLs (e.g., picsum.photos placeholders)
+  if (!url.includes('.aliyuncs.com')) return url;
+
+  // Skip if OSS is disabled
+  if (!config.oss.useOssUploader) return url;
+
+  const objectKey = extractObjectKeyFromUrl(url);
+  const bucket = detectBucketFromUrl(url);
+
+  if (!objectKey || !bucket) return url;
+
+  try {
+    const client = buildClient(bucket);
+    return client.signatureUrl(objectKey, {
+      method: 'GET',
+      expires: expiresIn,
+    });
+  } catch (err) {
+    // Log but don't fail - return original URL
+    console.warn('[OSS] signUrlFromStoredUrl failed:', err.message);
+    return url;
+  }
+}
+
+/**
+ * Convert an array of stored URLs to signed URLs.
+ * Handles mixed arrays (some OSS, some external URLs).
+ */
+export function signUrlsFromStoredUrls(urls, expiresIn = 3600) {
+  if (!Array.isArray(urls)) return urls;
+  return urls.map(url => signUrlFromStoredUrl(url, expiresIn));
+}
