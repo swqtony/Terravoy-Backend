@@ -1,13 +1,16 @@
 import { ok, error } from '../utils/responses.js';
 import { requireAuth, respondAuthError } from '../services/authService.js';
 import { authorize } from '../services/authorize.js';
+import { signUrlFromStoredUrl } from '../services/storage/ossStorageService.js';
 
 const NICKNAME_MAX_LEN = 32;
 const DEFAULT_AVATAR_URL = 'https://picsum.photos/seed/me/200';
 
 function resolveAvatarUrl(raw) {
   const trimmed = typeof raw === 'string' ? raw.trim() : '';
-  return trimmed || DEFAULT_AVATAR_URL;
+  if (!trimmed) return DEFAULT_AVATAR_URL;
+  // Sign OSS URLs for access when Block Public Access is enabled
+  return signUrlFromStoredUrl(trimmed);
 }
 
 function requireUserId(userId) {
@@ -199,16 +202,16 @@ export default async function profileRoutes(app) {
       if (Object.prototype.hasOwnProperty.call(payload, 'interests')) {
         const interests = Array.isArray(payload.interests)
           ? payload.interests
-              .map((val) => normalizeText(val))
-              .filter((val) => val)
+            .map((val) => normalizeText(val))
+            .filter((val) => val)
           : [];
         updates.interests = interests;
       }
       if (Object.prototype.hasOwnProperty.call(payload, 'communicableLanguages')) {
         const languages = Array.isArray(payload.communicableLanguages)
           ? payload.communicableLanguages
-              .map((val) => normalizeText(val))
-              .filter((val) => val)
+            .map((val) => normalizeText(val))
+            .filter((val) => val)
           : [];
         updates.communicable_languages = languages;
       }

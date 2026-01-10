@@ -9,7 +9,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-terravoy_dev}
       POSTGRES_DB: ${POSTGRES_DB:-terravoy}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_BIND_PORT:-5434}:5432"
     volumes:
       - terravoy_pg:/var/lib/postgresql/data
     healthcheck:
@@ -56,10 +56,10 @@ services:
       PUBLIC_MEDIA_BASE_URL: ${PUBLIC_MEDIA_BASE_URL:-}
       IM_API_BASE_URL: ${IM_API_BASE_URL:-http://host.docker.internal:8090}
     ports:
-      - "${PORT:-3000}:3000"
+      - "${PORT:-3000}:${PORT:-3000}"
     command: ["npm", "run", "start"]
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://localhost:' + (process.env.PORT || 3000) + '/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -103,3 +103,5 @@ services:
 
 volumes:
   terravoy_pg:
+    external: true
+    name: terravoy-backend_terravoy_pg_staging

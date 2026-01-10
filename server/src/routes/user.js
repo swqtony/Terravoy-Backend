@@ -1,5 +1,6 @@
 import { ok, error } from '../utils/responses.js';
 import { requireAuth, respondAuthError } from '../services/authService.js';
+import { signUrlFromStoredUrl } from '../services/storage/ossStorageService.js';
 
 function normalizeUserId(raw) {
   if (!raw) return '';
@@ -15,7 +16,9 @@ const DEFAULT_AVATAR_URL = 'https://picsum.photos/seed/me/200';
 
 function resolveAvatarUrl(raw) {
   const trimmed = typeof raw === 'string' ? raw.trim() : '';
-  return trimmed || DEFAULT_AVATAR_URL;
+  if (!trimmed) return DEFAULT_AVATAR_URL;
+  // Sign OSS URLs for access when Block Public Access is enabled
+  return signUrlFromStoredUrl(trimmed);
 }
 
 async function hasUserIdColumn(pool) {

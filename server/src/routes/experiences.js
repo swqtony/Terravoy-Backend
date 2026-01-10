@@ -3,6 +3,7 @@ import { requireAuth, respondAuthError } from '../services/authService.js';
 import { requireApprovedHost } from '../middlewares/requireApprovedHost.js';
 import { checkText } from '../services/contentSafetyService.js';
 import { logBlockedContent, buildTextPreview } from '../services/safetyAuditLogger.js';
+import { signUrlFromStoredUrl } from '../services/storage/ossStorageService.js';
 
 function normalizeInt(value, fallback) {
   const parsed = Number.parseInt(value, 10);
@@ -47,8 +48,8 @@ function mapExperience(row) {
     pricePerGuest: row.price_per_guest ?? 0,
     currency: row.currency ?? 'CNY',
     cancellationPolicy: row.cancellation_policy ?? 'flexible',
-    coverImageUrl: row.cover_image_url ?? '',
-    gallery: asStringArray(row.gallery_urls),
+    coverImageUrl: signUrlFromStoredUrl(row.cover_image_url ?? ''),
+    gallery: asStringArray(row.gallery_urls).map(signUrlFromStoredUrl),
     safetyNotes: row.safety_notes ?? '',
     meetupNotes: row.meetup_notes ?? '',
     status: row.status ?? 'draft',
@@ -77,9 +78,9 @@ function mapExperienceBrief(row) {
     reviewCount: row.review_count ?? 0,
     completedOrders: row.completed_orders ?? 0,
     status: row.status ?? 'draft',
-    coverImageUrl: row.cover_image_url ?? '',
+    coverImageUrl: signUrlFromStoredUrl(row.cover_image_url ?? ''),
     hostName: row.host_name ?? '',
-    hostAvatarUrl: row.host_avatar_url ?? '',
+    hostAvatarUrl: signUrlFromStoredUrl(row.host_avatar_url ?? ''),
     hostVerified: row.host_verified ?? false,
     updatedAt: toIso(row.updated_at) ?? new Date().toISOString(),
     tags: asStringArray(row.tags),
@@ -93,7 +94,7 @@ function mapExperienceDetail(row) {
   return {
     brief: mapExperienceBrief(row),
     description: row.description ?? '',
-    gallery: asStringArray(row.gallery_urls),
+    gallery: asStringArray(row.gallery_urls).map(signUrlFromStoredUrl),
     meetupNotes: row.meetup_notes ?? '',
     safetyNotes: row.safety_notes ?? '',
     cancellationPolicy: row.cancellation_policy ?? 'flexible',

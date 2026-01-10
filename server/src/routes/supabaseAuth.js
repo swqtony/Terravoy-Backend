@@ -6,6 +6,7 @@ import { verifyAccessToken } from '../plugins/authBearer.js';
 import { ok, error } from '../utils/responses.js';
 import { requireAuth, respondAuthError } from '../services/authService.js';
 import { pool } from '../db/pool.js';
+import { signUrlFromStoredUrl } from '../services/storage/ossStorageService.js';
 
 async function ensureProfile(userId) {
   const { rows } = await pool.query(
@@ -176,7 +177,7 @@ export default async function authRoutes(app) {
           verified_level: 0,
           credit_score: 500,
           nickname: profile?.nickname || '',
-          avatarUrl: profile?.avatar_url || '',
+          avatarUrl: signUrlFromStoredUrl(profile?.avatar_url || ''),
           gender: profile?.gender || '',
           match_profile: matchProfile ?? undefined,
         },
