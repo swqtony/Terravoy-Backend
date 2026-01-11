@@ -22,6 +22,7 @@ import adminReportsRoutes from './adminReports.js';
 import adminMediaRoutes from './adminMedia.js';
 import adminAuditLogsRoutes from './adminAuditLogs.js';
 import adminPostsRoutes from './adminPosts.js';
+import adminCommentsRoutes from './adminComments.js';
 import adminExperiencesRoutes from './adminExperiences.js';
 import adminOrdersRoutes from './adminOrders.js';
 import adminHostCertificationsRoutes from './adminHostCertifications.js';
@@ -36,6 +37,7 @@ export default function registerRoutes(app, prefix = '') {
     app.register(adminMediaRoutes);
     app.register(adminAuditLogsRoutes);
     app.register(adminPostsRoutes);
+    app.register(adminCommentsRoutes);
     app.register(adminExperiencesRoutes);
     app.register(adminOrdersRoutes);
     app.register(adminHostCertificationsRoutes);

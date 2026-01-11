@@ -1,6 +1,6 @@
 import { ok, error } from '../utils/responses.js';
 import { requireAuth, respondAuthError } from '../services/authService.js';
-const TARGET_TYPES = new Set(['chat', 'post', 'experience', 'user']);
+const TARGET_TYPES = new Set(['chat', 'post', 'experience', 'user', 'discover_comment']);
 const REASON_CODES = new Set(['spam', 'scam', 'harassment', 'illegal', 'other']);
 
 export default async function reportsRoutes(app) {

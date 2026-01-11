@@ -27,6 +27,59 @@ function toIso(value) {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 }
 
+const REVIEW_ROLE = {
+  TRAVELER: 'TRAVELER',
+  HOST: 'HOST',
+};
+
+const REVIEW_REVEAL_DAYS = 14;
+
+function normalizeLimit(value, fallback, max) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.min(parsed, max);
+}
+
+function decodeReviewCursor(cursor) {
+  if (!cursor) return null;
+  try {
+    const decoded = Buffer.from(cursor, 'base64').toString('utf8');
+    const [createdAtRaw, idRaw] = decoded.split('|');
+    if (!createdAtRaw || !idRaw) return null;
+    const createdAt = new Date(createdAtRaw);
+    const id = Number(idRaw);
+    if (Number.isNaN(createdAt.valueOf()) || !Number.isFinite(id)) return null;
+    return { createdAt, id };
+  } catch {
+    return null;
+  }
+}
+
+function encodeReviewCursor(createdAt, id) {
+  if (!createdAt || !id) return null;
+  const iso = createdAt instanceof Date ? createdAt.toISOString() : new Date(createdAt).toISOString();
+  return Buffer.from(`${iso}|${id}`).toString('base64');
+}
+
+function resolveReviewRole(review, order) {
+  if (review?.from_role) return review.from_role;
+  if (review?.from_user_id === order?.traveler_id) return REVIEW_ROLE.TRAVELER;
+  if (review?.from_user_id === order?.host_id) return REVIEW_ROLE.HOST;
+  return null;
+}
+
+function resolveToRole(review, fromRole) {
+  if (review?.to_role) return review.to_role;
+  if (fromRole === REVIEW_ROLE.TRAVELER) return REVIEW_ROLE.HOST;
+  if (fromRole === REVIEW_ROLE.HOST) return REVIEW_ROLE.TRAVELER;
+  return null;
+}
+
+function displayAuthorLabel(fromRole) {
+  if (fromRole === REVIEW_ROLE.HOST) return 'Host';
+  return 'Traveler';
+}
+
 function mapExperience(row) {
   return {
     id: row.id,
@@ -731,6 +784,97 @@ export default async function experienceRoutes(app) {
     } catch (err) {
       req.log.error(err);
       return error(reply, 'SERVER_ERROR', 'Failed to fetch experience detail', 500);
+    }
+  });
+
+  app.get('/functions/v1/experiences/:id/reviews', async (req, reply) => {
+    const id = req.params?.id;
+    const limit = normalizeLimit(req.query?.limit, 10, 50);
+    const cursor = req.query?.cursor;
+    const sort = (req.query?.sort || 'newest').toString().trim();
+    if (!id || String(id).trim().length === 0) {
+      return error(reply, 'INVALID_INPUT', 'experienceId is required', 400);
+    }
+    if (sort && sort !== 'newest') {
+      // Only newest is supported for now.
+    }
+
+    const cursorData = decodeReviewCursor(cursor);
+    if (cursor && !cursorData) {
+      return error(reply, 'INVALID_CURSOR', 'Invalid cursor', 400);
+    }
+
+    const params = [id, 'COMPLETED'];
+    const where = [
+      'o.experience_id = $1',
+      'o.status = $2',
+      `(
+        (
+          exists (
+            select 1 from reviews r2
+            where r2.order_id = o.id
+              and (r2.from_role = $3 or r2.from_user_id = o.traveler_id)
+          )
+          and exists (
+            select 1 from reviews r3
+            where r3.order_id = o.id
+              and (r3.from_role = $4 or r3.from_user_id = o.host_id)
+          )
+        )
+        or (o.completed_at is not null and o.completed_at + interval '${REVIEW_REVEAL_DAYS} days' <= now())
+      )`,
+    ];
+    params.push(REVIEW_ROLE.TRAVELER, REVIEW_ROLE.HOST);
+
+    if (cursorData) {
+      params.push(cursorData.createdAt);
+      params.push(cursorData.id);
+      where.push(`(r.created_at, r.id) < ($${params.length - 1}, $${params.length})`);
+    }
+
+    params.push(limit + 1);
+
+    const sql = `select
+        r.id,
+        r.rating,
+        r.comment,
+        r.created_at,
+        r.from_role,
+        r.to_role,
+        r.from_user_id,
+        r.to_user_id,
+        o.traveler_id,
+        o.host_id
+      from reviews r
+      join orders o on o.id = r.order_id
+      where ${where.join(' and ')}
+      order by r.created_at desc, r.id desc
+      limit $${params.length}`;
+
+    try {
+      const { rows } = await pool.query(sql, params);
+      const sliced = rows.slice(0, limit);
+      const items = sliced.map((row) => {
+        const fromRole = resolveReviewRole(row, row);
+        const toRole = resolveToRole(row, fromRole);
+        return {
+          id: row.id?.toString() ?? '',
+          rating: row.rating ?? 0,
+          comment: row.comment ?? '',
+          createdAt: toIso(row.created_at),
+          fromRole,
+          toRole,
+          displayAuthor: displayAuthorLabel(fromRole),
+        };
+      });
+      const last = items[items.length - 1];
+      const nextCursor = rows.length > limit && last
+        ? encodeReviewCursor(last.createdAt, last.id)
+        : null;
+      return ok(reply, { items, nextCursor });
+    } catch (err) {
+      req.log.error(err);
+      return error(reply, 'SERVER_ERROR', 'Failed to fetch experience reviews', 500);
     }
   });
 }

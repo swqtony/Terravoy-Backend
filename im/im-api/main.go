@@ -31,6 +31,7 @@ type Config struct {
 	DBDsn                string
 	RedisURL             string
 	AuthJWTSecret        string
+	LocalJWTSecret       string
 	RetentionMatchDays   int
 	RetentionOrderDays   int
 	PresenceTTLSeconds   int
@@ -103,31 +104,31 @@ func main() {
 	})
 
 	router.Route("/v1", func(r chi.Router) {
-		r.With(authMiddleware(cfg.AuthJWTSecret)).Get("/threads", func(w http.ResponseWriter, r *http.Request) {
+		r.With(authMiddleware(cfg.AuthJWTSecret, cfg.LocalJWTSecret)).Get("/threads", func(w http.ResponseWriter, r *http.Request) {
 			handleListThreads(w, r, pool)
 		})
-		r.With(authMiddleware(cfg.AuthJWTSecret)).Post("/threads/ensure", func(w http.ResponseWriter, r *http.Request) {
+		r.With(authMiddleware(cfg.AuthJWTSecret, cfg.LocalJWTSecret)).Post("/threads/ensure", func(w http.ResponseWriter, r *http.Request) {
 			handleEnsureThread(w, r, pool)
 		})
-		r.With(authMiddleware(cfg.AuthJWTSecret)).Post("/threads/{id}/read", func(w http.ResponseWriter, r *http.Request) {
+		r.With(authMiddleware(cfg.AuthJWTSecret, cfg.LocalJWTSecret)).Post("/threads/{id}/read", func(w http.ResponseWriter, r *http.Request) {
 			handleReadThread(w, r, pool)
 		})
-		r.With(authMiddleware(cfg.AuthJWTSecret)).Get("/threads/{id}/messages", func(w http.ResponseWriter, r *http.Request) {
+		r.With(authMiddleware(cfg.AuthJWTSecret, cfg.LocalJWTSecret)).Get("/threads/{id}/messages", func(w http.ResponseWriter, r *http.Request) {
 			handleListMessages(w, r, pool, cfg)
 		})
-		r.With(authMiddleware(cfg.AuthJWTSecret)).Post("/messages", func(w http.ResponseWriter, r *http.Request) {
+		r.With(authMiddleware(cfg.AuthJWTSecret, cfg.LocalJWTSecret)).Post("/messages", func(w http.ResponseWriter, r *http.Request) {
 			handleCreateMessage(w, r, pool, redisClient, cfg)
 		})
-		r.With(authMiddleware(cfg.AuthJWTSecret)).Get("/threads/{id}/permission", func(w http.ResponseWriter, r *http.Request) {
+		r.With(authMiddleware(cfg.AuthJWTSecret, cfg.LocalJWTSecret)).Get("/threads/{id}/permission", func(w http.ResponseWriter, r *http.Request) {
 			handlePermission(w, r, pool)
 		})
-		r.With(authMiddleware(cfg.AuthJWTSecret)).Get("/threads/{id}/members", func(w http.ResponseWriter, r *http.Request) {
+		r.With(authMiddleware(cfg.AuthJWTSecret, cfg.LocalJWTSecret)).Get("/threads/{id}/members", func(w http.ResponseWriter, r *http.Request) {
 			handleThreadMembers(w, r, pool)
 		})
-		r.With(authMiddleware(cfg.AuthJWTSecret)).Post("/push/token", func(w http.ResponseWriter, r *http.Request) {
+		r.With(authMiddleware(cfg.AuthJWTSecret, cfg.LocalJWTSecret)).Post("/push/token", func(w http.ResponseWriter, r *http.Request) {
 			handlePushToken(w, r, pool)
 		})
-		r.With(authMiddleware(cfg.AuthJWTSecret)).Post("/media/upload-url", func(w http.ResponseWriter, r *http.Request) {
+		r.With(authMiddleware(cfg.AuthJWTSecret, cfg.LocalJWTSecret)).Post("/media/upload-url", func(w http.ResponseWriter, r *http.Request) {
 			handleMediaUpload(w, r, cfg)
 		})
 	})
@@ -159,6 +160,7 @@ func loadConfig() Config {
 		DBDsn:                env("IM_DB_DSN", ""),
 		RedisURL:             env("IM_REDIS_URL", ""),
 		AuthJWTSecret:        env("AUTH_JWT_SECRET", ""),
+		LocalJWTSecret:       env("LOCAL_JWT_SECRET", ""),
 		RetentionMatchDays:   envInt("IM_RETENTION_MATCH_DAYS", 14),
 		RetentionOrderDays:   envInt("IM_RETENTION_ORDER_DAYS", 180),
 		PresenceTTLSeconds:   envInt("IM_PRESENCE_TTL_SECONDS", 75),
@@ -293,7 +295,7 @@ func (w *wrapWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
-func authMiddleware(secret string) func(http.Handler) http.Handler {
+func authMiddleware(secrets ...string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			auth := r.Header.Get("Authorization")
@@ -302,7 +304,7 @@ func authMiddleware(secret string) func(http.Handler) http.Handler {
 				writeError(w, r, http.StatusUnauthorized, "AUTH_REQUIRED", "missing bearer token")
 				return
 			}
-			sub, err := verifyJWT(parts[1], secret)
+			sub, err := verifyJWT(parts[1], secrets...)
 			if err != nil {
 				writeError(w, r, http.StatusUnauthorized, "AUTH_INVALID", "invalid token")
 				return
@@ -313,10 +315,25 @@ func authMiddleware(secret string) func(http.Handler) http.Handler {
 	}
 }
 
-func verifyJWT(tokenString, secret string) (string, error) {
-	if secret == "" {
-		return "", errors.New("missing secret")
+func verifyJWT(tokenString string, secrets ...string) (string, error) {
+	var lastErr error
+	for _, secret := range secrets {
+		if secret == "" {
+			continue
+		}
+		sub, err := verifyJWTWithSecret(tokenString, secret)
+		if err == nil {
+			return sub, nil
+		}
+		lastErr = err
 	}
+	if lastErr == nil {
+		lastErr = errors.New("missing secret")
+	}
+	return "", lastErr
+}
+
+func verifyJWTWithSecret(tokenString, secret string) (string, error) {
 	parsed, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		if token.Method.Alg() != jwt.SigningMethodHS256.Alg() {
 			return nil, fmt.Errorf("unexpected alg")

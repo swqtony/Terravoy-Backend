@@ -168,7 +168,13 @@ function extractObjectKeyFromUrl(url) {
   try {
     const parsed = new URL(url);
     // Object key is the path without leading slash
-    return parsed.pathname.replace(/^\//, '');
+    let path = parsed.pathname.replace(/^\//, '');
+    if (path.startsWith('api/v1/')) {
+      path = path.slice('api/v1/'.length);
+    } else if (path.startsWith('v1/')) {
+      path = path.slice('v1/'.length);
+    }
+    return path;
   } catch (_) {
     return null;
   }
@@ -201,14 +207,18 @@ function detectBucketFromUrl(url) {
 export function signUrlFromStoredUrl(url, expiresIn = 3600) {
   if (!url || typeof url !== 'string') return url;
 
-  // Skip non-OSS URLs (e.g., picsum.photos placeholders)
-  if (!url.includes('.aliyuncs.com')) return url;
-
   // Skip if OSS is disabled
   if (!config.oss.useOssUploader) return url;
 
   const objectKey = extractObjectKeyFromUrl(url);
-  const bucket = detectBucketFromUrl(url);
+  let bucket = detectBucketFromUrl(url);
+  if (!bucket && objectKey) {
+    if (objectKey.startsWith('public/')) {
+      bucket = config.oss.bucketPublic;
+    } else if (objectKey.startsWith('private/')) {
+      bucket = config.oss.bucketPrivate;
+    }
+  }
 
   if (!objectKey || !bucket) return url;
 

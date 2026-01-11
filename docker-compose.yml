@@ -35,6 +35,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-terravoy_dev}
       POSTGRES_DB: ${POSTGRES_DB:-terravoy}
       PORT: ${PORT:-3000}
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-dev_auth_jwt_secret}
       TERRA_JWT_SECRET: ${TERRA_JWT_SECRET:-dev_terra_secret_change_me}
       TERRA_DEV_TOKEN: ${TERRA_DEV_TOKEN:-dev_terra_token}
       LEAN_APP_ID: ${LEAN_APP_ID:-j66DPN5aeyYrMyytELnR2CHj-gzGzoHsz}
@@ -79,6 +80,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-terravoy}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-terravoy_dev}
       POSTGRES_DB: ${POSTGRES_DB:-terravoy}
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-dev_auth_jwt_secret}
       TERRA_JWT_SECRET: ${TERRA_JWT_SECRET:-dev_terra_secret_change_me}
       TERRA_DEV_TOKEN: ${TERRA_DEV_TOKEN:-dev_terra_token}
       LEAN_APP_ID: ${LEAN_APP_ID:-j66DPN5aeyYrMyytELnR2CHj-gzGzoHsz}

@@ -1,5 +1,5 @@
 import { ok, error, contentBlocked } from '../utils/responses.js';
-import { requireAuth, respondAuthError } from '../services/authService.js';
+import { AuthError, requireAuth, respondAuthError } from '../services/authService.js';
 import { checkText } from '../services/contentSafetyService.js';
 import { logBlockedContent, buildTextPreview } from '../services/safetyAuditLogger.js';
 import { signUrlsFromStoredUrls, signUrlFromStoredUrl } from '../services/storage/ossStorageService.js';
@@ -54,47 +54,99 @@ function mapPost(row) {
     imageUrls: signUrlsFromStoredUrls(asStringArray(row.images), 3600),
     likes: row.like_count ?? 0,
     comments: row.comment_count ?? 0,
+    isLiked: row.is_liked ?? false,
+    status: row.status ?? 'published',
     publishedAt: toIso(row.created_at) ?? new Date().toISOString(),
     tags: asStringArray(row.tags),
     video: row.video ?? null,
   };
 }
 
-function mapComment(row) {
+function mapComment(row, auth) {
   return {
     id: row.id,
     postId: row.post_id,
-    userId: row.user_id,
     authorName: row.author_name ?? '',
     authorAvatarUrl: row.author_avatar_url ?? '',
     content: row.content ?? '',
     createdAt: toIso(row.created_at) ?? new Date().toISOString(),
+    isMine: auth?.userId ? row.user_id === auth.userId : false,
   };
+}
+
+function nextStatusForAction(action, currentStatus) {
+  switch (action) {
+    case 'hide':
+      return currentStatus === 'published' ? 'hidden' : null;
+    case 'unhide':
+      return currentStatus === 'hidden' ? 'published' : null;
+    case 'delete':
+      return ['published', 'hidden'].includes(currentStatus) ? 'removed' : null;
+    default:
+      return null;
+  }
 }
 
 export default async function discoverPlazaRoutes(app) {
   const pool = app.pg.pool;
 
   app.get('/functions/v1/discover/posts', async (req, reply) => {
+    const mine = req.query?.mine?.toString() === '1';
     const limit = normalizeInt(req.query?.limit, 20);
     const city = (req.query?.city || '').toString().trim();
     const cursor = decodeCursor(req.query?.cursor);
 
-    const params = ['published'];
-    const where = ['status = $1'];
+    let auth = null;
+    if (mine) {
+      try {
+        auth = await requireAuth(req, reply);
+      } catch (err) {
+        if (respondAuthError(err, reply)) return;
+        throw err;
+      }
+    } else {
+      try {
+        auth = await requireAuth(req, null);
+      } catch (err) {
+        if (!(err instanceof AuthError)) {
+          throw err;
+        }
+      }
+    }
+
+    const params = [];
+    const where = [];
+    if (mine) {
+      const statusRaw = (req.query?.status || '').toString().trim();
+      const status = statusRaw || 'published';
+      if (!['published', 'hidden'].includes(status)) {
+        return error(reply, 'INVALID_REQUEST', 'Invalid status', 400);
+      }
+      params.push(auth.userId, status);
+      where.push('p.author_id = $1', 'p.status = $2');
+    } else {
+      params.push('published');
+      where.push('p.status = $1');
+    }
     if (city) {
       params.push(city);
-      where.push(`city = $${params.length}`);
+      where.push(`p.city = $${params.length}`);
     }
     if (cursor) {
       params.push(cursor.createdAt);
       params.push(cursor.id);
-      where.push(`(created_at, id) < ($${params.length - 1}, $${params.length})`);
+      where.push(`(p.created_at, p.id) < ($${params.length - 1}, $${params.length})`);
     }
 
+    let likedSelect = 'false as is_liked';
+    if (auth?.userId) {
+      params.push(auth.userId);
+      likedSelect =
+        `exists (select 1 from discover_post_likes l where l.post_id = p.id and l.user_id = $${params.length}) as is_liked`;
+    }
     params.push(limit + 1);
-    const sql = `select * from discover_posts where ${where.join(' and ')}
-      order by created_at desc, id desc
+    const sql = `select p.*, ${likedSelect} from discover_posts p where ${where.join(' and ')}
+      order by p.created_at desc, p.id desc
       limit $${params.length}`;
 
     try {
@@ -165,6 +217,57 @@ export default async function discoverPlazaRoutes(app) {
     } catch (err) {
       req.log.error(err);
       return error(reply, 'SERVER_ERROR', 'Failed to publish post', 500);
+    }
+  });
+
+  app.patch('/functions/v1/discover/posts/:id', async (req, reply) => {
+    let auth = null;
+    try {
+      auth = await requireAuth(req, reply);
+    } catch (err) {
+      if (respondAuthError(err, reply)) return;
+      throw err;
+    }
+
+    const postId = req.params?.id;
+    const action = (req.body?.action || '').toString().trim();
+    if (!postId || !action) {
+      return error(reply, 'INVALID_REQUEST', 'Invalid post action', 400);
+    }
+
+    try {
+      const { rows } = await pool.query(
+        'select id, author_id, status from discover_posts where id = $1 limit 1',
+        [postId]
+      );
+      const post = rows[0];
+      if (!post) {
+        return error(reply, 'NOT_FOUND', 'Post not found', 404);
+      }
+      if (post.author_id !== auth.userId) {
+        return error(reply, 'FORBIDDEN', 'No access to post', 403);
+      }
+      const nextStatus = nextStatusForAction(action, post.status);
+      if (!nextStatus) {
+        return error(reply, 'INVALID_STATUS', 'Invalid post action', 400);
+      }
+
+      const update = await pool.query(
+        `update discover_posts
+         set status = $1, updated_at = now()
+         where id = $2
+         returning id, status, updated_at`,
+        [nextStatus, postId]
+      );
+      const updated = update.rows[0];
+      return ok(reply, {
+        id: updated.id,
+        status: updated.status,
+        updatedAt: toIso(updated.updated_at),
+      });
+    } catch (err) {
+      req.log.error(err);
+      return error(reply, 'SERVER_ERROR', 'Failed to update post', 500);
     }
   });
 
@@ -256,11 +359,33 @@ export default async function discoverPlazaRoutes(app) {
 
   app.get('/functions/v1/discover/posts/:id/comments', async (req, reply) => {
     const postId = req.params?.id;
+    let auth = null;
+    try {
+      auth = await requireAuth(req, null);
+    } catch (err) {
+      if (!(err instanceof AuthError)) {
+        throw err;
+      }
+    }
     const limit = normalizeInt(req.query?.limit, 20);
     const cursor = decodeCursor(req.query?.cursor);
 
-    const params = [postId];
-    const where = ['post_id = $1'];
+    try {
+      const postResult = await pool.query(
+        'select status from discover_posts where id = $1 limit 1',
+        [postId]
+      );
+      const post = postResult.rows[0];
+      if (!post || post.status !== 'published') {
+        return error(reply, 'NOT_FOUND', 'Post not found', 404);
+      }
+    } catch (err) {
+      req.log.error(err);
+      return error(reply, 'SERVER_ERROR', 'Failed to fetch comments', 500);
+    }
+
+    const params = [postId, 'published'];
+    const where = ['post_id = $1', 'status = $2'];
     if (cursor) {
       params.push(cursor.createdAt);
       params.push(cursor.id);
@@ -276,7 +401,7 @@ export default async function discoverPlazaRoutes(app) {
       const { rows } = await pool.query(sql, params);
       const hasMore = rows.length > limit;
       const sliced = hasMore ? rows.slice(0, limit) : rows;
-      const comments = sliced.map(mapComment);
+      const comments = sliced.map((row) => mapComment(row, auth));
       const last = sliced[sliced.length - 1];
       const nextCursor = last ? encodeCursor(last.created_at, last.id) : null;
       return ok(reply, { comments, nextCursor, hasMore });
@@ -305,6 +430,15 @@ export default async function discoverPlazaRoutes(app) {
     const client = await pool.connect();
     try {
       await client.query('begin');
+      const postResult = await client.query(
+        'select status from discover_posts where id = $1 limit 1',
+        [postId]
+      );
+      const post = postResult.rows[0];
+      if (!post || post.status !== 'published') {
+        await client.query('rollback');
+        return error(reply, 'NOT_FOUND', 'Post not found', 404);
+      }
       const insert = await client.query(
         `insert into discover_comments (
           post_id, user_id, author_name, author_avatar_url, content
@@ -322,7 +456,7 @@ export default async function discoverPlazaRoutes(app) {
         [postId]
       );
       await client.query('commit');
-      return ok(reply, mapComment(insert.rows[0]));
+      return ok(reply, mapComment(insert.rows[0], auth));
     } catch (err) {
       await client.query('rollback');
       if (err?.code === '23503') {
@@ -330,6 +464,59 @@ export default async function discoverPlazaRoutes(app) {
       }
       req.log.error(err);
       return error(reply, 'SERVER_ERROR', 'Failed to publish comment', 500);
+    } finally {
+      client.release();
+    }
+  });
+
+  app.delete('/functions/v1/discover/posts/:postId/comments/:commentId', async (req, reply) => {
+    let auth = null;
+    try {
+      auth = await requireAuth(req, reply);
+    } catch (err) {
+      if (respondAuthError(err, reply)) return;
+      throw err;
+    }
+
+    const postId = req.params?.postId;
+    const commentId = req.params?.commentId;
+    if (!postId || !commentId) {
+      return error(reply, 'INVALID_REQUEST', 'Invalid comment id', 400);
+    }
+    const client = await pool.connect();
+    try {
+      await client.query('begin');
+      const { rows } = await client.query(
+        'select * from discover_comments where id = $1 and post_id = $2 limit 1',
+        [commentId, postId]
+      );
+      const comment = rows[0];
+      if (!comment) {
+        await client.query('rollback');
+        return error(reply, 'NOT_FOUND', 'Comment not found', 404);
+      }
+      if (comment.user_id !== auth.userId) {
+        await client.query('rollback');
+        return error(reply, 'FORBIDDEN', 'No access to comment', 403);
+      }
+      if (comment.status !== 'deleted') {
+        await client.query(
+          'update discover_comments set status = $1, updated_at = now() where id = $2',
+          ['deleted', commentId]
+        );
+        if (comment.status === 'published') {
+          await client.query(
+            'update discover_posts set comment_count = greatest(comment_count - 1, 0), updated_at = now() where id = $1',
+            [postId]
+          );
+        }
+      }
+      await client.query('commit');
+      return ok(reply, { id: commentId, status: 'deleted' });
+    } catch (err) {
+      await client.query('rollback');
+      req.log.error(err);
+      return error(reply, 'SERVER_ERROR', 'Failed to delete comment', 500);
     } finally {
       client.release();
     }

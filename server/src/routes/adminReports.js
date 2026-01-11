@@ -3,7 +3,7 @@ import { requirePermission } from '../middlewares/adminPermissions.js';
 import { logAdminAudit } from '../services/adminAuditService.js';
 
 const STATUSES = new Set(['pending', 'reviewing', 'resolved', 'rejected']);
-const TARGET_TYPES = new Set(['chat', 'post', 'experience', 'user']);
+const TARGET_TYPES = new Set(['chat', 'post', 'experience', 'user', 'discover_comment']);
 
 function normalizeString(value) {
   return (value || '').toString().trim();
