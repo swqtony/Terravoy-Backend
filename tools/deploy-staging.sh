@@ -36,7 +36,8 @@ check_ssh_key() {
 
 # SSH 命令封装
 ssh_cmd() {
-    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=30 "${STAGING_USER}@${STAGING_HOST}" "$@"
+    # -n prevents ssh from consuming stdin (so read prompts keep working with piped input)
+    ssh -n -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=30 "${STAGING_USER}@${STAGING_HOST}" "$@"
 }
 
 # 同步代码
