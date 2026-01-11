@@ -59,6 +59,17 @@ rebuild_api() {
     log_success "主后端重建完成"
 }
 
+run_migrations() {
+    log_info "🧩 检查数据库迁移..."
+    if ssh_cmd "cd $REMOTE_PATH && docker compose exec -T api npm run db:migrate -- --dry-run" | grep -q 'No pending migrations'; then
+        log_success "无需迁移"
+        return
+    fi
+    log_info "运行迁移..."
+    ssh_cmd "cd $REMOTE_PATH && docker compose exec -T api npm run db:migrate"
+    log_success "迁移完成"
+}
+
 # 重建 IM 服务
 rebuild_im() {
     log_info "🔨 重建 IM 服务 (im-api, im-gateway, im-worker)..."
@@ -136,6 +147,10 @@ main() {
         1)
             sync_code
             rebuild_api
+            read -rp "是否运行数据库迁移？(y/N): " run_migrate
+            if [[ "$run_migrate" =~ ^[Yy]$ ]]; then
+                run_migrations
+            fi
             ;;
         2)
             sync_code
@@ -145,6 +160,10 @@ main() {
             sync_code
             rebuild_api
             rebuild_im
+            read -rp "是否运行数据库迁移？(y/N): " run_migrate
+            if [[ "$run_migrate" =~ ^[Yy]$ ]]; then
+                run_migrations
+            fi
             ;;
         4)
             sync_code
