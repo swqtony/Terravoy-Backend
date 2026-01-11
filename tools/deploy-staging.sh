@@ -77,10 +77,14 @@ rebuild_im() {
     # 检查关键配置
     log_info "检查 .env.staging 配置..."
     local missing=""
-    if ! ssh_cmd "grep -q 'IM_DB_DSN=.*terravoy-db-staging' $REMOTE_PATH/.env.staging 2>/dev/null"; then
+    if ! ssh_cmd "grep -q '^IM_DB_DSN=' $REMOTE_PATH/.env.staging 2>/dev/null"; then
+        missing="$missing IM_DB_DSN"
+    elif ssh_cmd "grep -q '^IM_DB_DSN=$' $REMOTE_PATH/.env.staging 2>/dev/null"; then
         missing="$missing IM_DB_DSN"
     fi
-    if ! ssh_cmd "grep -q 'AUTH_JWT_SECRET=' $REMOTE_PATH/.env.staging 2>/dev/null"; then
+    if ! ssh_cmd "grep -q '^AUTH_JWT_SECRET=' $REMOTE_PATH/.env.staging 2>/dev/null"; then
+        missing="$missing AUTH_JWT_SECRET"
+    elif ssh_cmd "grep -q '^AUTH_JWT_SECRET=$' $REMOTE_PATH/.env.staging 2>/dev/null"; then
         missing="$missing AUTH_JWT_SECRET"
     fi
     if [[ -n "$missing" ]]; then
