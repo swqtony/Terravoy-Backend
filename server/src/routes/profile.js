@@ -2,6 +2,7 @@ import { ok, error } from '../utils/responses.js';
 import { requireAuth, respondAuthError } from '../services/authService.js';
 import { authorize } from '../services/authorize.js';
 import { signUrlFromStoredUrl } from '../services/storage/ossStorageService.js';
+import { config } from '../config.js';
 
 const NICKNAME_MAX_LEN = 32;
 const DEFAULT_AVATAR_URL = 'https://picsum.photos/seed/me/200';
@@ -45,6 +46,29 @@ async function fetchProfile(pool, profileId) {
 function normalizeText(val) {
   if (typeof val !== 'string') return '';
   return val.trim();
+}
+
+function normalizeAvatarUrlForStorage(raw) {
+  const trimmed = normalizeText(raw);
+  if (!trimmed) return '';
+  const base =
+    (config.media?.publicBaseUrl || config.oss?.publicBaseUrl || '').replace(/\/$/, '');
+  if (!base) return trimmed;
+  try {
+    const parsed = new URL(trimmed);
+    let path = parsed.pathname.replace(/^\/+/, '');
+    if (path.startsWith('api/v1/')) {
+      path = path.slice('api/v1/'.length);
+    } else if (path.startsWith('v1/')) {
+      path = path.slice('v1/'.length);
+    }
+    if (path.startsWith('public/')) {
+      return `${base}/${path}`;
+    }
+  } catch (_) {
+    // Fall through to return trimmed as-is.
+  }
+  return trimmed;
 }
 
 function computeProfileCompletion(profile) {
@@ -197,7 +221,7 @@ export default async function profileRoutes(app) {
         else updates.home_city = homeCity;
       }
       if (Object.prototype.hasOwnProperty.call(payload, 'avatarUrl')) {
-        updates.avatar_url = normalizeText(payload.avatarUrl);
+        updates.avatar_url = normalizeAvatarUrlForStorage(payload.avatarUrl);
       }
       if (Object.prototype.hasOwnProperty.call(payload, 'interests')) {
         const interests = Array.isArray(payload.interests)
