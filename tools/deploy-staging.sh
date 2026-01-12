@@ -60,6 +60,23 @@ rebuild_api() {
     log_success "主后端重建完成"
 }
 
+ensure_im_api_env() {
+    log_info "🔧 校验并修复 IM_API_BASE_URL..."
+    local current
+    current="$(ssh_cmd "grep -E '^IM_API_BASE_URL=' $REMOTE_PATH/.env 2>/dev/null | tail -n 1 | cut -d= -f2-")"
+    if [[ -z "$current" ]]; then
+        log_warn "IM_API_BASE_URL 未设置，自动写入 terravoy-im-api:8090"
+        ssh_cmd "echo 'IM_API_BASE_URL=http://terravoy-im-api:8090' >> $REMOTE_PATH/.env"
+        return
+    fi
+    if [[ "$current" == *":3100"* || "$current" == *"localhost"* || "$current" == *"127.0.0.1"* ]]; then
+        log_warn "IM_API_BASE_URL 指向后端或本地，自动修正为 terravoy-im-api:8090"
+        ssh_cmd "sed -i 's#^IM_API_BASE_URL=.*#IM_API_BASE_URL=http://terravoy-im-api:8090#' $REMOTE_PATH/.env"
+    else
+        log_success "IM_API_BASE_URL 正常: $current"
+    fi
+}
+
 run_migrations() {
     log_info "🧩 检查数据库迁移..."
     if ssh_cmd "cd $REMOTE_PATH && docker compose exec -T api npm run db:migrate -- --dry-run" | grep -q 'No pending migrations'; then
@@ -151,6 +168,7 @@ main() {
     case $choice in
         1)
             sync_code
+            ensure_im_api_env
             rebuild_api
             read -rp "是否运行数据库迁移？(y/N): " run_migrate
             if [[ "$run_migrate" =~ ^[Yy]$ ]]; then
@@ -163,6 +181,7 @@ main() {
             ;;
         3)
             sync_code
+            ensure_im_api_env
             rebuild_api
             rebuild_im
             read -rp "是否运行数据库迁移？(y/N): " run_migrate
