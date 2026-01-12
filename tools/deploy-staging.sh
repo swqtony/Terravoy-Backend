@@ -77,6 +77,35 @@ ensure_im_api_env() {
     fi
 }
 
+ensure_public_media_env() {
+    log_info "🖼️  校验并修复 PUBLIC_MEDIA_BASE_URL..."
+    local current
+    current="$(ssh_cmd "grep -E '^PUBLIC_MEDIA_BASE_URL=' $REMOTE_PATH/.env 2>/dev/null | tail -n 1 | cut -d= -f2-")"
+    local bucket
+    bucket="$(ssh_cmd "grep -E '^OSS_BUCKET_PUBLIC=' $REMOTE_PATH/.env 2>/dev/null | tail -n 1 | cut -d= -f2-")"
+    local endpoint
+    endpoint="$(ssh_cmd "grep -E '^OSS_ENDPOINT=' $REMOTE_PATH/.env 2>/dev/null | tail -n 1 | cut -d= -f2-")"
+    if [[ -z "$current" ]]; then
+        if [[ -n "$bucket" && -n "$endpoint" ]]; then
+            log_warn "PUBLIC_MEDIA_BASE_URL 未设置，自动写入 OSS 公网地址"
+            ssh_cmd "echo 'PUBLIC_MEDIA_BASE_URL=https://$bucket.$endpoint' >> $REMOTE_PATH/.env"
+        else
+            log_warn "PUBLIC_MEDIA_BASE_URL 未设置，但缺少 OSS_BUCKET_PUBLIC 或 OSS_ENDPOINT，跳过修复"
+        fi
+        return
+    fi
+    if [[ "$current" == *":3100"* || "$current" == *"localhost"* || "$current" == *"127.0.0.1"* ]]; then
+        if [[ -n "$bucket" && -n "$endpoint" ]]; then
+            log_warn "PUBLIC_MEDIA_BASE_URL 指向后端或本地，自动修正为 OSS 公网地址"
+            ssh_cmd "sed -i 's#^PUBLIC_MEDIA_BASE_URL=.*#PUBLIC_MEDIA_BASE_URL=https://$bucket.$endpoint#' $REMOTE_PATH/.env"
+        else
+            log_warn "PUBLIC_MEDIA_BASE_URL 指向后端或本地，但缺少 OSS_BUCKET_PUBLIC 或 OSS_ENDPOINT，跳过修复"
+        fi
+    else
+        log_success "PUBLIC_MEDIA_BASE_URL 正常: $current"
+    fi
+}
+
 run_migrations() {
     log_info "🧩 检查数据库迁移..."
     if ssh_cmd "cd $REMOTE_PATH && docker compose exec -T api npm run db:migrate -- --dry-run" | grep -q 'No pending migrations'; then
@@ -169,6 +198,7 @@ main() {
         1)
             sync_code
             ensure_im_api_env
+            ensure_public_media_env
             rebuild_api
             read -rp "是否运行数据库迁移？(y/N): " run_migrate
             if [[ "$run_migrate" =~ ^[Yy]$ ]]; then
@@ -182,6 +212,7 @@ main() {
         3)
             sync_code
             ensure_im_api_env
+            ensure_public_media_env
             rebuild_api
             rebuild_im
             read -rp "是否运行数据库迁移？(y/N): " run_migrate
